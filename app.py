@@ -22,7 +22,6 @@ from src.data_preprocessing import (
     load_and_clean_data,
 )
 from src.models import check_drift, evaluate_model, load_model
-from src.rag import generate_answer, load_faiss_index, retrieve_relevant_docs
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CSV_PATH = os.path.join(BASE_DIR, "amazon.csv")
@@ -157,11 +156,6 @@ def get_lr_model():
     return load_model("linear_regression_price")
 
 
-@st.cache_resource
-def get_rag_index():
-    return load_faiss_index()
-
-
 @st.cache_data
 def rf_test_predictions(_df):
     model = get_rf_model()
@@ -179,8 +173,27 @@ def lr_test_predictions(_df):
 
 
 def artifacts_ok():
-    needed = ["random_forest_discount.pkl", "faiss_index.pkl", "training_stats.json"]
+    needed = ["random_forest_discount.pkl", "linear_regression_price.pkl", "training_stats.json"]
     return all(os.path.exists(os.path.join(ARTIFACTS_DIR, f)) for f in needed)
+
+
+def _run_training():
+    from src.data_preprocessing import (
+        get_feature_target_for_discount,
+        get_feature_target_for_price,
+        load_and_clean_data,
+        save_training_stats,
+    )
+    from src.models import save_model, train_linear_regression, train_random_forest
+    os.makedirs(ARTIFACTS_DIR, exist_ok=True)
+    df_train = load_and_clean_data(CSV_PATH)
+    X_disc, y_disc = get_feature_target_for_discount(df_train)
+    rf, _ = train_random_forest(X_disc, y_disc)
+    save_model(rf, "random_forest_discount")
+    save_training_stats(X_disc)
+    X_price, y_price = get_feature_target_for_price(df_train)
+    lr, _ = train_linear_regression(X_price, y_price)
+    save_model(lr, "linear_regression_price")
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -189,19 +202,17 @@ with st.sidebar:
     st.markdown("---")
     page = st.radio(
         "Navigation",
-        ["🏠  Overview", "🏷️  Predict Discount", "💰  Predict Price", "🤖  AI Assistant", "📈  Model Insights"],
+        ["🏠  Overview", "🏷️  Predict Discount", "💰  Predict Price", "📈  Model Insights"],
         label_visibility="collapsed",
     )
     st.markdown("---")
-    if not artifacts_ok():
-        st.error("Models not found.\nRun `python train.py`.")
-    else:
+    if artifacts_ok():
         st.success("Models loaded ✅")
-        st.caption("LLM: " + os.environ.get("LLM_MODEL", "google/flan-t5-base"))
 
 if not artifacts_ok():
-    st.error("## ⚠️ Artifacts missing\nRun `python train.py` from the project directory to train models and build the RAG index.")
-    st.stop()
+    with st.spinner("⚙️ First run — training models on the dataset (takes ~30 s)…"):
+        _run_training()
+    st.rerun()
 
 df = get_data()
 
@@ -212,7 +223,7 @@ if "Overview" in page:
     st.title("Marketing Data Intelligence")
     st.markdown(
         "An end-to-end ML system for e-commerce analytics: "
-        "**discount prediction**, **price forecasting**, and an **AI assistant** powered by RAG + open-source LLMs."
+        "**discount prediction** and **price forecasting** on the Amazon Sales dataset."
     )
     st.markdown("---")
 
@@ -298,11 +309,7 @@ if "Overview" in page:
 | Data | Amazon Sales CSV |
 | Discount model | Random Forest |
 | Price model | Linear Regression |
-| Embeddings | all-MiniLM-L6-v2 |
-| Vector store | FAISS |
-| LLM | flan-t5-base |
-| API | FastAPI |
-| Container | Docker |
+| UI | Streamlit |
 """
         )
 
@@ -454,73 +461,6 @@ elif "Price" in page:
         ax.set_xlabel("Discounted Price (₹)")
         st.pyplot(fig, use_container_width=True)
         plt.close(fig)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# AI ASSISTANT
-# ══════════════════════════════════════════════════════════════════════════════
-elif "Assistant" in page:
-    st.title("🤖 AI Product Assistant")
-    st.markdown(
-        "Ask any question about products in the catalog. "
-        "The system retrieves the most relevant products using semantic search (FAISS + MiniLM), "
-        "then generates a grounded answer with `flan-t5-base`."
-    )
-    st.markdown("---")
-
-    if "history" not in st.session_state:
-        st.session_state.history = []
-
-    # Example questions
-    st.markdown("**Try asking:**")
-    e1, e2, e3, e4 = st.columns(4)
-    example_q = None
-    if e1.button("Best rated cables?"):
-        example_q = "What are the best rated charging cables?"
-    if e2.button("Cheapest smartwatches?"):
-        example_q = "Which smartwatches have the lowest price?"
-    if e3.button("High discount items?"):
-        example_q = "What products have the highest discount percentage?"
-    if e4.button("Good earbuds?"):
-        example_q = "Which earbuds have good reviews and ratings?"
-
-    query = st.text_input(
-        "Your question",
-        value=example_q or "",
-        placeholder="e.g. What USB cables are compatible with iPhone?",
-    )
-
-    col_ask, col_k, col_clear = st.columns([3, 1, 1])
-    with col_ask:
-        ask = st.button("Ask", type="primary", use_container_width=True)
-    with col_k:
-        top_k = st.selectbox("Sources", [3, 5, 7], index=0, label_visibility="collapsed")
-    with col_clear:
-        if st.button("Clear", use_container_width=True):
-            st.session_state.history = []
-            st.rerun()
-
-    if ask and query.strip():
-        with st.spinner("Searching products and generating answer…"):
-            try:
-                index, embed_model, documents = get_rag_index()
-                top_docs = retrieve_relevant_docs(query, index, embed_model, documents, top_k=top_k)
-                answer = generate_answer(query, top_docs)
-                st.session_state.history.insert(0, {"q": query, "a": answer, "docs": top_docs})
-            except Exception as e:
-                st.error(f"Error: {e}")
-
-    # Chat history
-    for item in st.session_state.history:
-        st.markdown(f'<div class="chat-q">🙋 {item["q"]}</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="answer-box">💬 {item["a"]}</div>', unsafe_allow_html=True)
-        with st.expander(f"View {len(item['docs'])} retrieved source documents"):
-            for i, doc in enumerate(item["docs"], 1):
-                st.markdown(f'<div class="source-doc"><strong>Source {i}</strong><br>{doc}</div>', unsafe_allow_html=True)
-        st.markdown("---")
-
-    if not st.session_state.history:
-        st.info("Ask a question above to get started. The assistant uses semantic search over 1,462 product descriptions and reviews.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
