@@ -11,6 +11,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
+from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
+from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.model_selection import train_test_split
 
 matplotlib.use("Agg")
@@ -22,6 +24,135 @@ from src.data_preprocessing import (
     load_and_clean_data,
 )
 from src.models import check_drift, evaluate_model, load_model
+
+# ── Model registry ────────────────────────────────────────────────────────────
+_MODELS = {
+    "Linear Regression": {
+        "cls": LinearRegression, "params": {},
+        "speed": "⚡ Instant",
+        "desc": (
+            "Finds the best straight line (or flat plane) through the data. "
+            "Each feature gets a weight — the prediction is just a weighted sum of your inputs. "
+            "You can inspect exactly which factors matter and by how much."
+        ),
+        "pros": "Extremely fast, fully interpretable, great baseline.",
+        "cons": "Assumes a perfectly linear relationship — misses curves, thresholds, and feature interactions.",
+    },
+    "Ridge Regression": {
+        "cls": Ridge, "params": {"alpha": 1.0},
+        "speed": "⚡ Instant",
+        "desc": (
+            "Linear Regression with a built-in 'penalty' that shrinks large coefficients. "
+            "When two input features are correlated (e.g. actual price and discounted price move together), "
+            "Ridge handles that more gracefully than plain Linear Regression."
+        ),
+        "pros": "More stable than Linear Regression when features are correlated. Still fully interpretable.",
+        "cons": "Still linear — same ceiling on complexity as Linear Regression.",
+    },
+    "Random Forest": {
+        "cls": RandomForestRegressor, "params": {"n_estimators": 200, "random_state": 42},
+        "speed": "🕐 ~2 s",
+        "desc": (
+            "Trains hundreds of independent decision trees on random slices of the data, "
+            "then averages all their predictions. Each tree learns slightly different patterns, "
+            "so the group is much more robust and accurate than any single tree."
+        ),
+        "pros": "Handles non-linear patterns and feature interactions. Robust to outliers. Usually very accurate.",
+        "cons": "Slower to train. Hard to interpret — you can see feature importance but not exact decision rules.",
+    },
+    "Gradient Boosting": {
+        "cls": GradientBoostingRegressor,
+        "params": {"n_estimators": 200, "learning_rate": 0.1, "random_state": 42},
+        "speed": "🕐 ~3 s",
+        "desc": (
+            "Builds trees one at a time, where each new tree focuses on correcting the mistakes "
+            "of all the previous ones. This 'boosting' process squeezes out maximum accuracy "
+            "and is one of the top-performing algorithms for structured data."
+        ),
+        "pros": "Often the most accurate on tabular data. Systematically learns from its own errors.",
+        "cons": "Slowest to train. More sensitive to settings. Can overfit if not tuned carefully.",
+    },
+}
+
+_DISCOUNT_FEATURES = ["actual_price", "discounted_price", "rating", "rating_count"]
+_PRICE_FEATURES    = ["actual_price", "rating", "rating_count", "discount_percentage"]
+
+# Per-model tunable parameters: (param_name, type, min, max, default, step, short_help, explanation)
+_TUNABLE = {
+    "Ridge Regression": [
+        ("alpha", "float", 0.01, 100.0, 1.0, 0.01,
+         "Regularization strength.",
+         "Controls how aggressively the model shrinks its coefficients. "
+         "**Low (0.01):** barely any shrinkage — behaves like plain Linear Regression and may overfit noisy data. "
+         "**High (100):** heavily shrinks all weights toward zero, which can underfit. "
+         "Start at 1 and increase if training score is much higher than test score."),
+    ],
+    "Random Forest": [
+        ("n_estimators", "int", 50, 500, 200, 10,
+         "Number of trees.",
+         "Each tree is trained on a random subset of the data. More trees reduce random variance — predictions become more stable and consistent. "
+         "Returns diminish past ~200; raise it if metric scores change noticeably between runs, lower it if training feels slow."),
+        ("max_depth", "int_none", 0, 30, 0, 1,
+         "Max depth of each tree (0 = unlimited).",
+         "**0 (unlimited):** trees grow until every leaf contains a single training sample — maximum fit but high memory use. "
+         "**Low depth (5–10):** shallower, faster trees that generalise better when the model is overfitting (test R² much lower than training R²). "
+         "Try reducing this first if you suspect overfitting."),
+        ("min_samples_split", "int", 2, 20, 2, 1,
+         "Min samples required to split a node.",
+         "**Low (2):** a node splits even with just two samples — very detailed trees, high overfitting risk. "
+         "**High (10–20):** forces each split to represent more data, creating simpler trees that generalise better. "
+         "Increase this alongside max_depth to control model complexity."),
+    ],
+    "Gradient Boosting": [
+        ("n_estimators", "int", 50, 500, 200, 10,
+         "Number of boosting stages.",
+         "Each stage adds one shallow tree that corrects the previous errors. More stages improve training fit but slow down training and increase overfitting risk. "
+         "Best used together with a lower learning_rate: halve the rate and double the estimators for similar accuracy with better generalisation."),
+        ("learning_rate", "float", 0.01, 0.5, 0.1, 0.01,
+         "Shrinks each tree's contribution.",
+         "**High (0.3–0.5):** learns quickly but can overshoot the optimum and overfit. "
+         "**Low (0.01–0.05):** each tree makes a smaller correction, so the model is more careful — but needs many more n_estimators to converge. "
+         "This is the most impactful knob: lower rate + more estimators almost always improves generalisation."),
+        ("max_depth", "int", 2, 10, 3, 1,
+         "Max depth of each tree.",
+         "Unlike Random Forest, Gradient Boosting works best with **shallow trees (depth 3–5)**. "
+         "Each tree only needs to capture one layer of error, not the full pattern. "
+         "Deeper trees capture more complex corrections but overfit quickly. "
+         "Increase only if R² is low and you've already tried more estimators with a lower learning rate."),
+    ],
+}
+
+
+def _model_param_ui(model_name: str, key_prefix: str) -> str:
+    """Render parameter sliders for `model_name` and return a JSON string of overrides."""
+    specs = _TUNABLE.get(model_name)
+    if not specs:
+        with st.expander("⚙️ Fine-tune parameters"):
+            st.info(
+                "Linear Regression has no tunable parameters — it solves for the optimal weights analytically. "
+                "To control complexity, switch to Ridge Regression and adjust its alpha."
+            )
+        return "{}"
+
+    params: dict = {}
+    with st.expander("⚙️ Fine-tune parameters"):
+        for param, ptype, lo, hi, default, step, short_help, explanation in specs:
+            wkey = f"params_{key_prefix}_{param}"
+            if ptype == "float":
+                val = st.slider(param, float(lo), float(hi), float(default), float(step),
+                                key=wkey, help=short_help)
+                params[param] = val
+            elif ptype == "int":
+                val = st.slider(param, int(lo), int(hi), int(default), int(step),
+                                key=wkey, help=short_help)
+                params[param] = val
+            elif ptype == "int_none":
+                val = st.slider(param, int(lo), int(hi), int(default), int(step),
+                                key=wkey, help=short_help)
+                params[param] = None if val == 0 else val
+            st.caption(explanation)
+    return json.dumps(params, sort_keys=True)
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CSV_PATH = os.path.join(BASE_DIR, "amazon.csv")
@@ -154,6 +285,31 @@ def get_rf_model():
 @st.cache_resource
 def get_lr_model():
     return load_model("linear_regression_price")
+
+
+@st.cache_resource
+def train_dynamic_model(model_name: str, task: str, params_json: str = "{}"):
+    df_tr = load_and_clean_data(CSV_PATH)
+    if task == "discount":
+        X, y = get_feature_target_for_discount(df_tr)
+    else:
+        X, y = get_feature_target_for_price(df_tr)
+    cfg = _MODELS[model_name]
+    merged = {**cfg["params"], **json.loads(params_json)}
+    m = cfg["cls"](**merged)
+    m.fit(X, y)
+    return m
+
+
+@st.cache_data
+def dynamic_test_predictions(_df, model_name: str, task: str, params_json: str = "{}"):
+    model = train_dynamic_model(model_name, task, params_json)
+    if task == "discount":
+        X, y = get_feature_target_for_discount(_df)
+    else:
+        X, y = get_feature_target_for_price(_df)
+    _, X_test, _, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    return y_test.values, model.predict(X_test), evaluate_model(model, X_test, y_test)
 
 
 @st.cache_data
@@ -329,13 +485,15 @@ if "Overview" in page:
 
     with c2:
         st.subheader("System Architecture")
+        _disc_sel = st.session_state.get("disc_model", "Random Forest")
+        _price_sel = st.session_state.get("price_model", "Linear Regression")
         st.markdown(
-            """
+            f"""
 | Component | Technology |
 |-----------|-----------|
 | Data | Amazon Sales CSV |
-| Discount model | Random Forest |
-| Price model | Linear Regression |
+| Discount model | {_disc_sel} |
+| Price model | {_price_sel} |
 | UI | Streamlit |
 """
         )
@@ -355,7 +513,23 @@ if "Overview" in page:
 # ══════════════════════════════════════════════════════════════════════════════
 elif "Discount" in page:
     st.title("🏷️ Predict Discount Percentage")
-    st.markdown("Adjust the product attributes — the RandomForest model predicts the discount in real-time.")
+    st.markdown("Choose a model, adjust the product attributes, and see the predicted discount in real-time.")
+    st.markdown("---")
+
+    # ── Model selector ─────────────────────────────────────────────────────
+    disc_model_name = st.selectbox(
+        "Model",
+        list(_MODELS.keys()),
+        index=2,   # Random Forest default
+        key="disc_model",
+    )
+    _dcfg = _MODELS[disc_model_name]
+    with st.expander(f"📖 What is {disc_model_name}?  {_dcfg['speed']}"):
+        st.markdown(_dcfg["desc"])
+        pc1, pc2 = st.columns(2)
+        pc1.success(f"✅ **Strengths:** {_dcfg['pros']}")
+        pc2.warning(f"⚠️ **Limitations:** {_dcfg['cons']}")
+    disc_params_json = _model_param_ui(disc_model_name, "disc")
     st.markdown("---")
 
     col_in, col_out = st.columns([1, 1], gap="large")
@@ -383,9 +557,10 @@ elif "Discount" in page:
 
     with col_out:
         st.subheader("Prediction")
-        rf = get_rf_model()
+        with st.spinner(f"Running {disc_model_name}…"):
+            disc_model = train_dynamic_model(disc_model_name, "discount", disc_params_json)
         feats = np.array([[actual_price, discounted_price, rating, float(rating_count)]])
-        pred = float(rf.predict(feats)[0])
+        pred = float(disc_model.predict(feats)[0])
         pred = np.clip(pred, 0.0, 100.0)
 
         # Big result
@@ -453,7 +628,23 @@ elif "Discount" in page:
 # ══════════════════════════════════════════════════════════════════════════════
 elif "Price" in page:
     st.title("💰 Predict Discounted Price")
-    st.markdown("Enter product details to forecast the selling price using the Linear Regression model.")
+    st.markdown("Choose a model, enter product details, and see the predicted selling price.")
+    st.markdown("---")
+
+    # ── Model selector ─────────────────────────────────────────────────────
+    price_model_name = st.selectbox(
+        "Model",
+        list(_MODELS.keys()),
+        index=0,   # Linear Regression default
+        key="price_model",
+    )
+    _pcfg = _MODELS[price_model_name]
+    with st.expander(f"📖 What is {price_model_name}?  {_pcfg['speed']}"):
+        st.markdown(_pcfg["desc"])
+        pc1, pc2 = st.columns(2)
+        pc1.success(f"✅ **Strengths:** {_pcfg['pros']}")
+        pc2.warning(f"⚠️ **Limitations:** {_pcfg['cons']}")
+    price_params_json = _model_param_ui(price_model_name, "price")
     st.markdown("---")
 
     col_in, col_out = st.columns([1, 1], gap="large")
@@ -467,9 +658,10 @@ elif "Price" in page:
 
     with col_out:
         st.subheader("Prediction")
-        lr = get_lr_model()
+        with st.spinner(f"Running {price_model_name}…"):
+            price_model = train_dynamic_model(price_model_name, "price", price_params_json)
         feats = np.array([[ap, rat, float(rat_cnt), disc_pct]])
-        pred_price = float(lr.predict(feats)[0])
+        pred_price = float(price_model.predict(feats)[0])
         formula_price = ap * (1 - disc_pct / 100)
 
         st.markdown(
@@ -494,20 +686,32 @@ elif "Price" in page:
                 st.markdown("Simple maths: `MRP × (1 − discount %)`. The model differs from this because real product prices are influenced by brand positioning, review volume, and category norms — not just the raw discount applied to MRP.")
 
         st.markdown("---")
-        st.subheader("Model Coefficients")
-        coef_df = pd.DataFrame(
-            {"Feature": ["actual_price", "rating", "rating_count", "discount_percentage"], "Coefficient": lr.coef_}
-        )
-        fig, ax = dark_fig(6, 3)
-        colors = [GREEN if c > 0 else RED for c in coef_df["Coefficient"]]
-        ax.barh(coef_df["Feature"], coef_df["Coefficient"], color=colors)
-        ax.axvline(0, color=TEXT, linewidth=0.8)
-        ax.set_xlabel("Coefficient value")
-        st.pyplot(fig, use_container_width=True)
-        plt.close(fig)
-        with st.popover("ℹ️ What does this show?", use_container_width=True):
-            st.markdown("**Model Coefficients**")
-            st.markdown("Each bar shows how much one feature shifts the predicted price. **Green (positive)** = higher value raises the predicted price. **Red (negative)** = higher value lowers it. The longer the bar, the stronger the influence. For example, a high `discount_percentage` is negative — more discount means lower selling price.")
+        if hasattr(price_model, "coef_"):
+            st.subheader("Model Coefficients")
+            coef_df = pd.DataFrame(
+                {"Feature": _PRICE_FEATURES, "Coefficient": price_model.coef_}
+            )
+            fig, ax = dark_fig(6, 3)
+            colors = [GREEN if c > 0 else RED for c in coef_df["Coefficient"]]
+            ax.barh(coef_df["Feature"], coef_df["Coefficient"], color=colors)
+            ax.axvline(0, color=TEXT, linewidth=0.8)
+            ax.set_xlabel("Coefficient value")
+            st.pyplot(fig, use_container_width=True)
+            plt.close(fig)
+            with st.popover("ℹ️ What does this show?", use_container_width=True):
+                st.markdown("**Model Coefficients**")
+                st.markdown("Each bar shows how much one feature shifts the predicted price. **Green (positive)** = higher value raises the predicted price. **Red (negative)** = higher value lowers it. The longer the bar, the stronger the influence. For example, a high `discount_percentage` is negative — more discount means lower selling price.")
+        elif hasattr(price_model, "feature_importances_"):
+            st.subheader("Feature Importance")
+            imp_df = pd.DataFrame({"Feature": _PRICE_FEATURES, "Importance": price_model.feature_importances_}).sort_values("Importance")
+            fig, ax = dark_fig(6, 3)
+            ax.barh(imp_df["Feature"], imp_df["Importance"], color=PURPLE, edgecolor=SURFACE)
+            ax.set_xlabel("Importance")
+            st.pyplot(fig, use_container_width=True)
+            plt.close(fig)
+            with st.popover("ℹ️ What does this show?", use_container_width=True):
+                st.markdown("**Feature Importance**")
+                st.markdown("Which inputs this model relied on most. A longer bar means that feature had more influence on the prediction.")
 
         st.markdown("---")
         st.subheader("Price Range in Dataset")
@@ -531,71 +735,104 @@ elif "Insights" in page:
     st.title("📈 Model Insights")
     st.markdown("---")
 
+    _model_names = list(_MODELS.keys())
+    ic1, ic2 = st.columns(2)
+    with ic1:
+        ins_disc_model = st.selectbox(
+            "Discount model",
+            _model_names,
+            index=_model_names.index(st.session_state.get("disc_model", "Random Forest")),
+            key="disc_model",
+        )
+        ins_disc_params_json = _model_param_ui(ins_disc_model, "disc")
+    with ic2:
+        ins_price_model = st.selectbox(
+            "Price model",
+            _model_names,
+            index=_model_names.index(st.session_state.get("price_model", "Linear Regression")),
+            key="price_model",
+        )
+        ins_price_params_json = _model_param_ui(ins_price_model, "price")
+
     with st.spinner("Computing evaluation metrics…"):
-        y_test_rf, y_pred_rf, rf_metrics = rf_test_predictions(df)
-        y_test_lr, y_pred_lr, lr_metrics = lr_test_predictions(df)
+        y_test_disc, y_pred_disc, disc_metrics = dynamic_test_predictions(df, ins_disc_model, "discount", ins_disc_params_json)
+        y_test_price, y_pred_price, price_metrics = dynamic_test_predictions(df, ins_price_model, "price", ins_price_params_json)
 
     # ── Metrics cards ──────────────────────────────────────────────────────
     st.subheader("Evaluation Metrics")
     c1, c2 = st.columns(2)
 
     with c1:
-        st.markdown("#### 🌲 RandomForest — Discount Prediction")
+        st.markdown(f"#### Discount — {ins_disc_model}")
         m1, m2, m3 = st.columns(3)
         with m1:
-            st.metric("R²", f"{rf_metrics['r2']:.4f}")
+            st.metric("R²", f"{disc_metrics['r2']:.4f}")
             with st.popover("ℹ️", use_container_width=True):
                 st.markdown("**R² (R-squared)**")
-                st.markdown("How much of the variation in discount percentages the model explains. 0 = no better than guessing the average; 1 = perfect. **0.967** means the model explains 96.7% of the variation — excellent.")
+                st.markdown("How much of the variation in discount percentages the model explains. 0 = no better than guessing the average; 1 = perfect. Closer to 1 is better.")
         with m2:
-            st.metric("RMSE", f"{rf_metrics['rmse']:.2f} pp")
+            st.metric("RMSE", f"{disc_metrics['rmse']:.2f} pp")
             with st.popover("ℹ️", use_container_width=True):
                 st.markdown("**RMSE (Root Mean Squared Error)**")
-                st.markdown("The typical size of prediction errors, in percentage points. **3.78 pp** means the model is off by about 3.78 percentage points on average. Larger errors are penalised more than smaller ones.")
+                st.markdown("Typical prediction error in percentage points. Larger errors are penalised more than smaller ones.")
         with m3:
-            st.metric("MAE", f"{rf_metrics['mae']:.2f} pp")
+            st.metric("MAE", f"{disc_metrics['mae']:.2f} pp")
             with st.popover("ℹ️", use_container_width=True):
                 st.markdown("**MAE (Mean Absolute Error)**")
-                st.markdown("The average absolute difference between predicted and actual discounts, in percentage points. **2.13 pp** means predictions are typically within ~2 points of the real value. Unlike RMSE, large errors aren't penalised extra.")
+                st.markdown("Average absolute difference between predicted and actual discounts, in percentage points. Unlike RMSE, large errors aren't penalised extra.")
 
     with c2:
-        st.markdown("#### 📉 LinearRegression — Price Prediction")
+        st.markdown(f"#### Price — {ins_price_model}")
         m1, m2, m3 = st.columns(3)
         with m1:
-            st.metric("R²", f"{lr_metrics['r2']:.4f}")
+            st.metric("R²", f"{price_metrics['r2']:.4f}")
             with st.popover("ℹ️", use_container_width=True):
                 st.markdown("**R² (R-squared)**")
-                st.markdown("How much of the variation in selling prices the model explains. **0.951** means 95.1% explained — very strong. The remaining 4.9% reflects factors not captured in the four input features.")
+                st.markdown("How much of the variation in selling prices the model explains. Closer to 1 is better.")
         with m2:
-            st.metric("RMSE", f"₹{lr_metrics['rmse']:.0f}")
+            st.metric("RMSE", f"₹{price_metrics['rmse']:.0f}")
             with st.popover("ℹ️", use_container_width=True):
                 st.markdown("**RMSE (Root Mean Squared Error)**")
-                st.markdown("Typical prediction error in rupees. **₹1,200** means the model's price estimates are off by about ₹1,200 on average. High-value products naturally have larger absolute errors.")
+                st.markdown("Typical prediction error in rupees. High-value products naturally have larger absolute errors.")
         with m3:
-            st.metric("MAE", f"₹{lr_metrics['mae']:.0f}")
+            st.metric("MAE", f"₹{price_metrics['mae']:.0f}")
             with st.popover("ℹ️", use_container_width=True):
                 st.markdown("**MAE (Mean Absolute Error)**")
-                st.markdown("Average absolute price prediction error. **₹733** means typical predictions are within ₹733 of the actual selling price — better than RMSE suggests because a few large misses inflate RMSE.")
+                st.markdown("Average absolute price prediction error. A few large misses can inflate RMSE more than MAE.")
 
     st.markdown("---")
 
-    # ── Feature importance ─────────────────────────────────────────────────
-    st.subheader("Feature Importance — RandomForest")
-    rf = get_rf_model()
-    feature_names = ["actual_price", "discounted_price", "rating", "rating_count"]
-    imp_df = pd.DataFrame({"Feature": feature_names, "Importance": rf.feature_importances_}).sort_values("Importance")
+    # ── Feature importance / coefficients ──────────────────────────────────
+    disc_model_obj = train_dynamic_model(ins_disc_model, "discount", ins_disc_params_json)
+    feature_names_disc = ["actual_price", "discounted_price", "rating", "rating_count"]
 
-    fig, ax = dark_fig(8, 3)
-    bars = ax.barh(imp_df["Feature"], imp_df["Importance"], color=PURPLE, edgecolor=SURFACE)
-    for bar, val in zip(bars, imp_df["Importance"]):
-        ax.text(val + 0.005, bar.get_y() + bar.get_height() / 2, f"{val:.3f}", va="center", color=TEXT, fontsize=9)
-    ax.set_xlabel("Importance")
-    ax.set_xlim(0, imp_df["Importance"].max() * 1.18)
-    st.pyplot(fig, use_container_width=True)
-    plt.close(fig)
-    with st.popover("ℹ️ What does this show?", use_container_width=True):
-        st.markdown("**Feature Importance**")
-        st.markdown("Which inputs the RandomForest relied on most to predict discounts. A higher bar = that feature was used in more decision splits. **actual_price** and **discounted_price** dominate because the price ratio directly determines the discount — rating and review count add nuance.")
+    if hasattr(disc_model_obj, "feature_importances_"):
+        st.subheader(f"Feature Importance — {ins_disc_model}")
+        imp_df = pd.DataFrame({"Feature": feature_names_disc, "Importance": disc_model_obj.feature_importances_}).sort_values("Importance")
+        fig, ax = dark_fig(8, 3)
+        bars = ax.barh(imp_df["Feature"], imp_df["Importance"], color=PURPLE, edgecolor=SURFACE)
+        for bar, val in zip(bars, imp_df["Importance"]):
+            ax.text(val + 0.005, bar.get_y() + bar.get_height() / 2, f"{val:.3f}", va="center", color=TEXT, fontsize=9)
+        ax.set_xlabel("Importance")
+        ax.set_xlim(0, imp_df["Importance"].max() * 1.18)
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+        with st.popover("ℹ️ What does this show?", use_container_width=True):
+            st.markdown("**Feature Importance**")
+            st.markdown("Which inputs the model relied on most to predict discounts. A higher bar = that feature drove more of the decision. Price features dominate because the price ratio directly determines the discount — rating and review count add nuance.")
+    elif hasattr(disc_model_obj, "coef_"):
+        st.subheader(f"Feature Coefficients — {ins_disc_model}")
+        coef_df = pd.DataFrame({"Feature": feature_names_disc, "Coefficient": disc_model_obj.coef_}).sort_values("Coefficient")
+        fig, ax = dark_fig(8, 3)
+        colors = [GREEN if v >= 0 else RED for v in coef_df["Coefficient"]]
+        bars = ax.barh(coef_df["Feature"], coef_df["Coefficient"], color=colors, edgecolor=SURFACE)
+        ax.axvline(0, color=TEXT, linewidth=0.8, linestyle="--")
+        ax.set_xlabel("Coefficient")
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+        with st.popover("ℹ️ What does this show?", use_container_width=True):
+            st.markdown("**Feature Coefficients**")
+            st.markdown("Each bar shows how much one unit increase in that feature changes the predicted discount. Green = raises the predicted discount; red = lowers it. Longer bar = stronger effect.")
 
     st.markdown("---")
 
@@ -604,10 +841,10 @@ elif "Insights" in page:
     c1, c2 = st.columns(2)
 
     with c1:
-        st.markdown("**Discount % (RandomForest)**")
+        st.markdown(f"**Discount % — {ins_disc_model}**")
         fig, ax = dark_fig(6, 4.5)
-        ax.scatter(y_test_rf, y_pred_rf, alpha=0.35, color=BLUE, s=18, label="Predictions")
-        mn, mx = min(y_test_rf.min(), y_pred_rf.min()), max(y_test_rf.max(), y_pred_rf.max())
+        ax.scatter(y_test_disc, y_pred_disc, alpha=0.35, color=BLUE, s=18, label="Predictions")
+        mn, mx = min(y_test_disc.min(), y_pred_disc.min()), max(y_test_disc.max(), y_pred_disc.max())
         ax.plot([mn, mx], [mn, mx], "--", color=RED, linewidth=1.5, label="Perfect fit")
         ax.set_xlabel("Actual Discount (%)")
         ax.set_ylabel("Predicted Discount (%)")
@@ -619,12 +856,12 @@ elif "Insights" in page:
             st.markdown("Each dot is one product from the held-out test set. The x-axis is the real discount; the y-axis is what the model predicted. Dots along the red diagonal = perfect predictions. Scatter away from it = error. A tight cluster along the line means the model generalises well.")
 
     with c2:
-        st.markdown("**Discounted Price ₹ (LinearRegression)**")
+        st.markdown(f"**Discounted Price ₹ — {ins_price_model}**")
         fig, ax = dark_fig(6, 4.5)
-        cap = np.percentile(y_test_lr, 97)
-        mask = (y_test_lr <= cap) & (y_pred_lr <= cap)
-        ax.scatter(y_test_lr[mask], y_pred_lr[mask], alpha=0.35, color=GREEN, s=18, label="Predictions")
-        mn, mx = y_test_lr[mask].min(), y_test_lr[mask].max()
+        cap = np.percentile(y_test_price, 97)
+        mask = (y_test_price <= cap) & (y_pred_price <= cap)
+        ax.scatter(y_test_price[mask], y_pred_price[mask], alpha=0.35, color=GREEN, s=18, label="Predictions")
+        mn, mx = y_test_price[mask].min(), y_test_price[mask].max()
         ax.plot([mn, mx], [mn, mx], "--", color=RED, linewidth=1.5, label="Perfect fit")
         ax.set_xlabel("Actual Price (₹)")
         ax.set_ylabel("Predicted Price (₹)")
@@ -642,13 +879,13 @@ elif "Insights" in page:
     c1, c2 = st.columns(2)
 
     with c1:
-        residuals_rf = y_test_rf - y_pred_rf
+        residuals_disc = y_test_disc - y_pred_disc
         fig, ax = dark_fig(6, 3.5)
-        ax.hist(residuals_rf, bins=40, color=PURPLE, edgecolor=SURFACE, linewidth=0.3)
+        ax.hist(residuals_disc, bins=40, color=PURPLE, edgecolor=SURFACE, linewidth=0.3)
         ax.axvline(0, color=RED, linewidth=1.5, linestyle="--")
         ax.set_xlabel("Residual (Actual − Predicted) %")
         ax.set_ylabel("Count")
-        ax.set_title("RF Residuals")
+        ax.set_title(f"{ins_disc_model} Residuals")
         st.pyplot(fig, use_container_width=True)
         plt.close(fig)
         with st.popover("ℹ️ What does this show?", use_container_width=True):
@@ -656,19 +893,19 @@ elif "Insights" in page:
             st.markdown("A residual is `actual − predicted` for each test product. A bell-shaped histogram centred on 0 (the red dashed line) means errors are random and symmetric — the model isn't systematically over- or under-predicting. That's a sign of a healthy, unbiased model.")
 
     with c2:
-        residuals_lr = y_test_lr - y_pred_lr
-        clipped_res = np.clip(residuals_lr, np.percentile(residuals_lr, 2), np.percentile(residuals_lr, 98))
+        residuals_price = y_test_price - y_pred_price
+        clipped_res = np.clip(residuals_price, np.percentile(residuals_price, 2), np.percentile(residuals_price, 98))
         fig, ax = dark_fig(6, 3.5)
         ax.hist(clipped_res, bins=40, color=GREEN, edgecolor=SURFACE, linewidth=0.3)
         ax.axvline(0, color=RED, linewidth=1.5, linestyle="--")
         ax.set_xlabel("Residual (Actual − Predicted) ₹")
         ax.set_ylabel("Count")
-        ax.set_title("LR Residuals (2–98th pct)")
+        ax.set_title(f"{ins_price_model} Residuals (2–98th pct)")
         st.pyplot(fig, use_container_width=True)
         plt.close(fig)
         with st.popover("ℹ️ What does this show?", use_container_width=True):
             st.markdown("**Price Model Residuals**")
-            st.markdown("Same idea for the price model, clipped at the 2nd–98th percentile to remove extreme outliers. Centred near 0 = good. A slight right skew would mean the model occasionally under-predicts high-end prices — worth watching if you're using this for premium product pricing.")
+            st.markdown("Same idea for the price model, clipped at the 2nd–98th percentile to remove extreme outliers. Centred near 0 = good. A slight right skew would mean the model occasionally under-predicts high-end prices.")
 
     st.markdown("---")
 
