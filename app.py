@@ -77,27 +77,48 @@ _MODELS = {
 _DISCOUNT_FEATURES = ["actual_price", "discounted_price", "rating", "rating_count"]
 _PRICE_FEATURES    = ["actual_price", "rating", "rating_count", "discount_percentage"]
 
-# Per-model tunable parameters: (param_name, type, min, max, default, help_text)
+# Per-model tunable parameters: (param_name, type, min, max, default, step, short_help, explanation)
 _TUNABLE = {
     "Ridge Regression": [
         ("alpha", "float", 0.01, 100.0, 1.0, 0.01,
-         "Regularization strength. Higher = smaller, more conservative coefficients."),
+         "Regularization strength.",
+         "Controls how aggressively the model shrinks its coefficients. "
+         "**Low (0.01):** barely any shrinkage — behaves like plain Linear Regression and may overfit noisy data. "
+         "**High (100):** heavily shrinks all weights toward zero, which can underfit. "
+         "Start at 1 and increase if training score is much higher than test score."),
     ],
     "Random Forest": [
         ("n_estimators", "int", 50, 500, 200, 10,
-         "Number of trees. More trees = stabler but slower."),
+         "Number of trees.",
+         "Each tree is trained on a random subset of the data. More trees reduce random variance — predictions become more stable and consistent. "
+         "Returns diminish past ~200; raise it if metric scores change noticeably between runs, lower it if training feels slow."),
         ("max_depth", "int_none", 0, 30, 0, 1,
-         "Maximum depth of each tree. 0 = unlimited (trees grow until leaves are pure)."),
+         "Max depth of each tree (0 = unlimited).",
+         "**0 (unlimited):** trees grow until every leaf contains a single training sample — maximum fit but high memory use. "
+         "**Low depth (5–10):** shallower, faster trees that generalise better when the model is overfitting (test R² much lower than training R²). "
+         "Try reducing this first if you suspect overfitting."),
         ("min_samples_split", "int", 2, 20, 2, 1,
-         "Min samples required to split a node. Higher = simpler, less overfit trees."),
+         "Min samples required to split a node.",
+         "**Low (2):** a node splits even with just two samples — very detailed trees, high overfitting risk. "
+         "**High (10–20):** forces each split to represent more data, creating simpler trees that generalise better. "
+         "Increase this alongside max_depth to control model complexity."),
     ],
     "Gradient Boosting": [
         ("n_estimators", "int", 50, 500, 200, 10,
-         "Number of boosting stages. More = better fit but slower and can overfit."),
+         "Number of boosting stages.",
+         "Each stage adds one shallow tree that corrects the previous errors. More stages improve training fit but slow down training and increase overfitting risk. "
+         "Best used together with a lower learning_rate: halve the rate and double the estimators for similar accuracy with better generalisation."),
         ("learning_rate", "float", 0.01, 0.5, 0.1, 0.01,
-         "Shrinks each tree's contribution. Lower rate needs more trees."),
+         "Shrinks each tree's contribution.",
+         "**High (0.3–0.5):** learns quickly but can overshoot the optimum and overfit. "
+         "**Low (0.01–0.05):** each tree makes a smaller correction, so the model is more careful — but needs many more n_estimators to converge. "
+         "This is the most impactful knob: lower rate + more estimators almost always improves generalisation."),
         ("max_depth", "int", 2, 10, 3, 1,
-         "Max depth of each tree. Deeper = more complex, higher risk of overfitting."),
+         "Max depth of each tree.",
+         "Unlike Random Forest, Gradient Boosting works best with **shallow trees (depth 3–5)**. "
+         "Each tree only needs to capture one layer of error, not the full pattern. "
+         "Deeper trees capture more complex corrections but overfit quickly. "
+         "Increase only if R² is low and you've already tried more estimators with a lower learning rate."),
     ],
 }
 
@@ -107,25 +128,29 @@ def _model_param_ui(model_name: str, key_prefix: str) -> str:
     specs = _TUNABLE.get(model_name)
     if not specs:
         with st.expander("⚙️ Fine-tune parameters"):
-            st.info("Linear Regression has no tunable parameters — it finds the optimal weights analytically.")
+            st.info(
+                "Linear Regression has no tunable parameters — it solves for the optimal weights analytically. "
+                "To control complexity, switch to Ridge Regression and adjust its alpha."
+            )
         return "{}"
 
     params: dict = {}
     with st.expander("⚙️ Fine-tune parameters"):
-        for param, ptype, lo, hi, default, step, help_text in specs:
+        for param, ptype, lo, hi, default, step, short_help, explanation in specs:
             wkey = f"params_{key_prefix}_{param}"
             if ptype == "float":
                 val = st.slider(param, float(lo), float(hi), float(default), float(step),
-                                key=wkey, help=help_text)
+                                key=wkey, help=short_help)
                 params[param] = val
             elif ptype == "int":
                 val = st.slider(param, int(lo), int(hi), int(default), int(step),
-                                key=wkey, help=help_text)
+                                key=wkey, help=short_help)
                 params[param] = val
             elif ptype == "int_none":
                 val = st.slider(param, int(lo), int(hi), int(default), int(step),
-                                key=wkey, help=help_text)
+                                key=wkey, help=short_help)
                 params[param] = None if val == 0 else val
+            st.caption(explanation)
     return json.dumps(params, sort_keys=True)
 
 
