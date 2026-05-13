@@ -598,6 +598,61 @@ elif "Explorer" in page:
             "The diagonal is always 1 (every feature is perfectly correlated with itself)."
         )
 
+    with st.expander("🔢 How each number is calculated"):
+        st.markdown("#### The Pearson Correlation Formula")
+        st.markdown(
+            "Every cell value is computed using this formula:\n\n"
+            "$$r = \\frac{\\sum_{i=1}^{n}(x_i - \\bar{x})(y_i - \\bar{y})}"
+            "{\\sqrt{\\sum_{i=1}^{n}(x_i - \\bar{x})^2 \\;\\cdot\\; \\sum_{i=1}^{n}(y_i - \\bar{y})^2}}$$\n\n"
+            "Where **x** and **y** are the two features being compared, and the bar (x̄, ȳ) means the average."
+        )
+
+        st.markdown("#### What each part means")
+        st.markdown(
+            "| Part | What it does |\n"
+            "|------|--------------|\n"
+            "| $x_i - \\bar{x}$ | How far product *i*'s value is from the average (its deviation) |\n"
+            "| $(x_i - \\bar{x})(y_i - \\bar{y})$ | Multiply the two deviations together. Positive when both are above/below average simultaneously. |\n"
+            "| $\\sum$ (numerator) | Sum those products across all 1,465 products. Large positive sum → features tend to rise and fall together. |\n"
+            "| $\\sqrt{\\cdots}$ (denominator) | Scales the result to always land between −1 and +1, regardless of the units. |"
+        )
+
+        st.markdown("#### Worked example — 3 products")
+        st.markdown(
+            "Suppose we want the correlation between **Actual Price** and **Discount %** for 3 products:\n\n"
+            "| Product | Actual Price (₹) | Discount % |\n"
+            "|---------|-----------------|------------|\n"
+            "| A | 500 | 20 |\n"
+            "| B | 1 000 | 50 |\n"
+            "| C | 2 000 | 70 |\n\n"
+            "**Step 1 — Compute averages:**  \n"
+            "Mean price = (500 + 1000 + 2000) ÷ 3 = **1 167**  \n"
+            "Mean discount = (20 + 50 + 70) ÷ 3 = **46.7%**\n\n"
+            "**Step 2 — Compute deviations** (value − mean):\n\n"
+            "| Product | Price dev | Discount dev | Product of devs |\n"
+            "|---------|-----------|--------------|----------------|\n"
+            "| A | 500 − 1167 = **−667** | 20 − 46.7 = **−26.7** | (−667)(−26.7) = **+17 809** |\n"
+            "| B | 1000 − 1167 = **−167** | 50 − 46.7 = **+3.3** | (−167)(+3.3) = **−551** |\n"
+            "| C | 2000 − 1167 = **+833** | 70 − 46.7 = **+23.3** | (+833)(+23.3) = **+19 409** |\n\n"
+            "**Step 3 — Sum the products of deviations (numerator):**  \n"
+            "17 809 − 551 + 19 409 = **+36 667**  \n"
+            "Positive sum → the two features tend to move in the same direction.\n\n"
+            "**Step 4 — Compute the denominator (the scaling factor):**  \n"
+            "Price variance: (−667)² + (−167)² + (+833)² = 444 889 + 27 889 + 693 889 = 1 166 667  \n"
+            "Discount variance: (−26.7)² + (+3.3)² + (+23.3)² = 712.9 + 10.9 + 542.9 = 1 266.7  \n"
+            "Denominator = √(1 166 667 × 1 266.7) = **√1 477 477 889 ≈ 38 438**\n\n"
+            "**Step 5 — Divide:**  \n"
+            "r = 36 667 ÷ 38 438 ≈ **+0.95**  \n\n"
+            "This strong positive value confirms: in these 3 products, higher MRP → bigger discount. "
+            "The real dataset runs the same calculation across all **1,465 products** to produce each cell in the heatmap."
+        )
+
+        st.markdown("#### Why the diagonal is always 1.00")
+        st.markdown(
+            "When both features are the same (e.g. actual_price vs actual_price), "
+            "every deviation product $(x_i - \\bar{x})^2$ is always positive, and the numerator equals the denominator exactly — so r = 1."
+        )
+
     st.markdown("---")
 
     # ── Section 2: Plain-English Insights ─────────────────────────────────
