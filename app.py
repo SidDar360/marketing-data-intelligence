@@ -202,7 +202,7 @@ with st.sidebar:
     st.markdown("---")
     page = st.radio(
         "Navigation",
-        ["🏠  Overview", "🏷️  Predict Discount", "💰  Predict Price", "📈  Model Insights"],
+        ["🏠  Overview", "🏷️  Predict Discount", "💰  Predict Price", "🤖  AI Assistant", "📈  Model Insights"],
         label_visibility="collapsed",
     )
     st.markdown("---")
@@ -231,15 +231,30 @@ if "Overview" in page:
     k1, k2, k3, k4, k5 = st.columns(5)
     with k1:
         st.markdown(f'<div class="kpi-card"><div class="kpi-value">{len(df):,}</div><div class="kpi-label">Products</div></div>', unsafe_allow_html=True)
+        with st.popover("ℹ️", use_container_width=True):
+            st.markdown("**Total Products**")
+            st.markdown("The number of unique Amazon products in this dataset after cleaning. A larger dataset gives the models more examples to learn from, making predictions more reliable.")
     with k2:
         st.markdown(f'<div class="kpi-card"><div class="kpi-value">{df["category"].nunique()}</div><div class="kpi-label">Categories</div></div>', unsafe_allow_html=True)
+        with st.popover("ℹ️", use_container_width=True):
+            st.markdown("**Product Categories**")
+            st.markdown("The number of distinct product types covered — from electronics to kitchen items. Wider variety means the models have learned patterns across many different kinds of products.")
     with k3:
         st.markdown(f'<div class="kpi-card"><div class="kpi-value">{df["discount_percentage"].mean():.1f}%</div><div class="kpi-label">Avg Discount</div></div>', unsafe_allow_html=True)
+        with st.popover("ℹ️", use_container_width=True):
+            st.markdown("**Average Discount**")
+            st.markdown("The typical discount across all products in the dataset. This is the baseline the discount model was trained on — predictions near this value are most reliable.")
     with k4:
         st.markdown(f'<div class="kpi-card"><div class="kpi-value">{df["rating"].mean():.2f}</div><div class="kpi-label">Avg Rating</div></div>', unsafe_allow_html=True)
+        with st.popover("ℹ️", use_container_width=True):
+            st.markdown("**Average Rating**")
+            st.markdown("The mean customer satisfaction score (out of 5) across all products. Higher ratings tend to correlate with higher prices — the models use this as a feature.")
     with k5:
         med_price = df["discounted_price"].median()
         st.markdown(f'<div class="kpi-card"><div class="kpi-value">₹{med_price:,.0f}</div><div class="kpi-label">Median Price</div></div>', unsafe_allow_html=True)
+        with st.popover("ℹ️", use_container_width=True):
+            st.markdown("**Median Selling Price**")
+            st.markdown("Half of all products sell for less than this, half for more. The median is more reliable than the average here because a few very expensive products would skew the average upward.")
 
     st.markdown("---")
 
@@ -256,6 +271,9 @@ if "Overview" in page:
         ax.legend(labelcolor=TEXT, facecolor=DARK, edgecolor=BORDER, fontsize=8)
         st.pyplot(fig, use_container_width=True)
         plt.close(fig)
+        with st.popover("ℹ️ What does this show?", use_container_width=True):
+            st.markdown("**Discount Distribution**")
+            st.markdown("How discounts are spread across all products. The dashed line is the average. Most products cluster between 20–70% off — this is the range the model learned the most from and where it's most accurate.")
 
     with c2:
         st.subheader("Rating Distribution")
@@ -265,6 +283,9 @@ if "Overview" in page:
         ax.set_ylabel("Count")
         st.pyplot(fig, use_container_width=True)
         plt.close(fig)
+        with st.popover("ℹ️ What does this show?", use_container_width=True):
+            st.markdown("**Rating Distribution**")
+            st.markdown("How customer ratings are distributed across products. The strong skew toward 4–5 stars is typical for Amazon listings — few products survive long with poor reviews.")
 
     with c3:
         st.subheader("Price Distribution")
@@ -275,6 +296,9 @@ if "Overview" in page:
         ax.set_ylabel("Count")
         st.pyplot(fig, use_container_width=True)
         plt.close(fig)
+        with st.popover("ℹ️ What does this show?", use_container_width=True):
+            st.markdown("**Price Distribution**")
+            st.markdown("How selling prices are spread, clipped at the 97th percentile to remove extreme outliers. The long tail to the right means a few high-end products are priced far above the majority — the model is less confident for those.")
 
     st.markdown("---")
 
@@ -299,6 +323,9 @@ if "Overview" in page:
         ax.set_ylabel("Discount (%)")
         st.pyplot(fig, use_container_width=True)
         plt.close(fig)
+        with st.popover("ℹ️ What does this show?", use_container_width=True):
+            st.markdown("**Actual Price vs Discount %**")
+            st.markdown("Each dot is one product. Position shows its original price (x-axis) and discount (y-axis). Dot colour indicates the rating. No strong pattern means price alone doesn't determine the discount — the model uses all four features together.")
 
     with c2:
         st.subheader("System Architecture")
@@ -367,13 +394,24 @@ elif "Discount" in page:
             f'<div class="kpi-label">Predicted Discount</div></div>',
             unsafe_allow_html=True,
         )
+        with st.popover("ℹ️ What is this?", use_container_width=True):
+            st.markdown("**Predicted Discount**")
+            st.markdown("The RandomForest model's estimate of what discount percentage this product would typically carry. It learned this from 1,465 Amazon products — similar price-to-rating combinations in the training data shape this number.")
         st.progress(int(pred))
 
         # Implied vs actual discount
         implied = (1 - discounted_price / actual_price) * 100 if actual_price > 0 else 0.0
         colA, colB = st.columns(2)
-        colA.metric("Model Prediction", f"{pred:.1f}%")
-        colB.metric("Implied by Prices", f"{implied:.1f}%", delta=f"{pred - implied:+.1f}pp vs implied")
+        with colA:
+            st.metric("Model Prediction", f"{pred:.1f}%")
+            with st.popover("ℹ️", use_container_width=True):
+                st.markdown("**Model Prediction**")
+                st.markdown("The RandomForest's output based on the pattern it learned from the training data. It captures non-obvious relationships between price, ratings, and typical discount levels.")
+        with colB:
+            st.metric("Implied by Prices", f"{implied:.1f}%", delta=f"{pred - implied:+.1f}pp vs implied")
+            with st.popover("ℹ️", use_container_width=True):
+                st.markdown("**Implied by Prices**")
+                st.markdown("Simple maths: `(MRP − Selling Price) ÷ MRP × 100`. This is the literal discount if you were to list at exactly these two prices. The model prediction often differs because real-world discounts reflect market positioning, not just the price gap.")
 
         # Drift
         drift = check_drift(
@@ -390,6 +428,9 @@ elif "Discount" in page:
             )
         else:
             st.markdown('<div class="drift-ok">✅ Inputs within training distribution.</div>', unsafe_allow_html=True)
+        with st.popover("ℹ️ What is drift?", use_container_width=True):
+            st.markdown("**Input Drift**")
+            st.markdown("Drift means your inputs look very different from what the model was trained on. Specifically, one or more values is more than 3 standard deviations from the training average. When drift is detected, the prediction is technically valid but comes from a region of the data the model has seen fewer examples of — treat it with extra caution.")
 
         # Context histogram
         st.markdown("**Where does this prediction fall in the dataset?**")
@@ -402,6 +443,9 @@ elif "Discount" in page:
         ax.set_xlabel("Discount (%)")
         st.pyplot(fig, use_container_width=True)
         plt.close(fig)
+        with st.popover("ℹ️ What does this show?", use_container_width=True):
+            st.markdown("**Context Histogram**")
+            st.markdown("The grey bars show the full spread of discount percentages in the dataset. The purple line marks your prediction. If the line is in the tail (far left or right), the model has seen fewer similar examples and may be less accurate.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -433,10 +477,21 @@ elif "Price" in page:
             f'<div class="kpi-label">Predicted Selling Price</div></div>',
             unsafe_allow_html=True,
         )
+        with st.popover("ℹ️ What is this?", use_container_width=True):
+            st.markdown("**Predicted Selling Price**")
+            st.markdown("The LinearRegression model's estimate of what this product would actually sell for given its MRP, rating, review count, and discount level. It learned from 1,465 real Amazon listings.")
 
         c1, c2 = st.columns(2)
-        c1.metric("Model Prediction", f"₹{pred_price:,.0f}")
-        c2.metric("Formula (MRP × discount)", f"₹{formula_price:,.0f}", delta=f"₹{pred_price - formula_price:+,.0f}")
+        with c1:
+            st.metric("Model Prediction", f"₹{pred_price:,.0f}")
+            with st.popover("ℹ️", use_container_width=True):
+                st.markdown("**Model Prediction**")
+                st.markdown("The LinearRegression's output. It weights each input feature (MRP, rating, etc.) differently based on what it learned from the data, giving a more nuanced estimate than a simple formula.")
+        with c2:
+            st.metric("Formula (MRP × discount)", f"₹{formula_price:,.0f}", delta=f"₹{pred_price - formula_price:+,.0f}")
+            with st.popover("ℹ️", use_container_width=True):
+                st.markdown("**Formula Price**")
+                st.markdown("Simple maths: `MRP × (1 − discount %)`. The model differs from this because real product prices are influenced by brand positioning, review volume, and category norms — not just the raw discount applied to MRP.")
 
         st.markdown("---")
         st.subheader("Model Coefficients")
@@ -450,6 +505,9 @@ elif "Price" in page:
         ax.set_xlabel("Coefficient value")
         st.pyplot(fig, use_container_width=True)
         plt.close(fig)
+        with st.popover("ℹ️ What does this show?", use_container_width=True):
+            st.markdown("**Model Coefficients**")
+            st.markdown("Each bar shows how much one feature shifts the predicted price. **Green (positive)** = higher value raises the predicted price. **Red (negative)** = higher value lowers it. The longer the bar, the stronger the influence. For example, a high `discount_percentage` is negative — more discount means lower selling price.")
 
         st.markdown("---")
         st.subheader("Price Range in Dataset")
@@ -461,6 +519,108 @@ elif "Price" in page:
         ax.set_xlabel("Discounted Price (₹)")
         st.pyplot(fig, use_container_width=True)
         plt.close(fig)
+        with st.popover("ℹ️ What does this show?", use_container_width=True):
+            st.markdown("**Price Range Context**")
+            st.markdown("The grey bars show the full spread of selling prices in the dataset (top 3% clipped). The green line marks your prediction. If the line is far from the main cluster, the model has seen fewer similar products and the prediction may be less accurate.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AI ASSISTANT
+# ══════════════════════════════════════════════════════════════════════════════
+elif "Assistant" in page:
+    st.title("🤖 AI Data Assistant")
+    st.markdown(
+        "Ask anything about the dataset, models, or predictions — answered in plain English."
+    )
+    st.markdown("---")
+
+    # ── API key ────────────────────────────────────────────────────────────
+    try:
+        api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+    except Exception:
+        api_key = ""
+    api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+
+    if not api_key:
+        st.error(
+            "**ANTHROPIC_API_KEY not set.**\n\n"
+            "**Running locally?** Create `.streamlit/secrets.toml` and add:\n"
+            "```\nANTHROPIC_API_KEY = \"sk-ant-...\"\n```\n\n"
+            "**Streamlit Cloud?** Go to your app → ⋮ menu → **Settings → Secrets** and add the key there."
+        )
+        st.stop()
+
+    import anthropic as _anthropic
+
+    _SYSTEM = """You are a helpful data analyst assistant for a Marketing Data Intelligence app.
+The app analyses an Amazon product dataset containing 1,465 products across 25+ categories.
+
+Key dataset facts:
+- Average discount: ~50% off original price
+- Average product rating: 4.1 / 5  (scale 1–5)
+- Median selling price: ₹999
+
+Two ML models are deployed:
+1. RandomForest  → predicts discount_percentage.  R²=0.967, RMSE=3.78pp, MAE=2.13pp
+2. LinearRegression → predicts discounted_price.  R²=0.951, RMSE=₹1200, MAE=₹733
+
+Features used by each model:
+- Discount model: actual_price, discounted_price, rating, rating_count
+- Price model:    actual_price, rating, rating_count, discount_percentage
+
+The app also detects input drift: if any input is >3 standard deviations from the training mean, a warning is shown.
+
+Answer in clear, simple language. Avoid jargon unless the user asks for technical depth. Keep answers concise."""
+
+    # ── Session state ──────────────────────────────────────────────────────
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+    # ── Example buttons (only shown when chat is empty) ────────────────────
+    if not st.session_state.messages:
+        st.markdown("**Try asking:**")
+        eq1, eq2, eq3, eq4 = st.columns(4)
+        _example = None
+        if eq1.button("What does R² mean?", use_container_width=True):
+            _example = "What does an R² score of 0.967 mean in plain English?"
+        if eq2.button("Why might my prediction be off?", use_container_width=True):
+            _example = "The model predicted a different discount than I expected. What could cause that?"
+        if eq3.button("When should I not trust the model?", use_container_width=True):
+            _example = "When should I not trust the predictions from these models?"
+        if eq4.button("What drives discounts most?", use_container_width=True):
+            _example = "Which product features have the biggest influence on the predicted discount?"
+        if _example:
+            st.session_state.messages.append({"role": "user", "content": _example})
+            st.rerun()
+
+    # ── Render conversation history ────────────────────────────────────────
+    for _msg in st.session_state.messages:
+        with st.chat_message(_msg["role"]):
+            st.markdown(_msg["content"])
+
+    # ── Clear button ───────────────────────────────────────────────────────
+    if st.session_state.messages:
+        if st.button("🗑️ Clear conversation", type="secondary"):
+            st.session_state.messages = []
+            st.rerun()
+
+    # ── Chat input & streamed response ─────────────────────────────────────
+    if _prompt := st.chat_input("Ask about the data, models, or predictions…"):
+        st.session_state.messages.append({"role": "user", "content": _prompt})
+        with st.chat_message("user"):
+            st.markdown(_prompt)
+
+        with st.chat_message("assistant"):
+            _client = _anthropic.Anthropic(api_key=api_key)
+            with _client.messages.stream(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=1024,
+                system=_SYSTEM,
+                messages=st.session_state.messages,
+            ) as _stream:
+                _response = st.write_stream(_stream.text_stream)
+
+        st.session_state.messages.append({"role": "assistant", "content": _response})
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -481,16 +641,40 @@ elif "Insights" in page:
     with c1:
         st.markdown("#### 🌲 RandomForest — Discount Prediction")
         m1, m2, m3 = st.columns(3)
-        m1.metric("R²", f"{rf_metrics['r2']:.4f}")
-        m2.metric("RMSE", f"{rf_metrics['rmse']:.2f} pp")
-        m3.metric("MAE", f"{rf_metrics['mae']:.2f} pp")
+        with m1:
+            st.metric("R²", f"{rf_metrics['r2']:.4f}")
+            with st.popover("ℹ️", use_container_width=True):
+                st.markdown("**R² (R-squared)**")
+                st.markdown("How much of the variation in discount percentages the model explains. 0 = no better than guessing the average; 1 = perfect. **0.967** means the model explains 96.7% of the variation — excellent.")
+        with m2:
+            st.metric("RMSE", f"{rf_metrics['rmse']:.2f} pp")
+            with st.popover("ℹ️", use_container_width=True):
+                st.markdown("**RMSE (Root Mean Squared Error)**")
+                st.markdown("The typical size of prediction errors, in percentage points. **3.78 pp** means the model is off by about 3.78 percentage points on average. Larger errors are penalised more than smaller ones.")
+        with m3:
+            st.metric("MAE", f"{rf_metrics['mae']:.2f} pp")
+            with st.popover("ℹ️", use_container_width=True):
+                st.markdown("**MAE (Mean Absolute Error)**")
+                st.markdown("The average absolute difference between predicted and actual discounts, in percentage points. **2.13 pp** means predictions are typically within ~2 points of the real value. Unlike RMSE, large errors aren't penalised extra.")
 
     with c2:
         st.markdown("#### 📉 LinearRegression — Price Prediction")
         m1, m2, m3 = st.columns(3)
-        m1.metric("R²", f"{lr_metrics['r2']:.4f}")
-        m2.metric("RMSE", f"₹{lr_metrics['rmse']:.0f}")
-        m3.metric("MAE", f"₹{lr_metrics['mae']:.0f}")
+        with m1:
+            st.metric("R²", f"{lr_metrics['r2']:.4f}")
+            with st.popover("ℹ️", use_container_width=True):
+                st.markdown("**R² (R-squared)**")
+                st.markdown("How much of the variation in selling prices the model explains. **0.951** means 95.1% explained — very strong. The remaining 4.9% reflects factors not captured in the four input features.")
+        with m2:
+            st.metric("RMSE", f"₹{lr_metrics['rmse']:.0f}")
+            with st.popover("ℹ️", use_container_width=True):
+                st.markdown("**RMSE (Root Mean Squared Error)**")
+                st.markdown("Typical prediction error in rupees. **₹1,200** means the model's price estimates are off by about ₹1,200 on average. High-value products naturally have larger absolute errors.")
+        with m3:
+            st.metric("MAE", f"₹{lr_metrics['mae']:.0f}")
+            with st.popover("ℹ️", use_container_width=True):
+                st.markdown("**MAE (Mean Absolute Error)**")
+                st.markdown("Average absolute price prediction error. **₹733** means typical predictions are within ₹733 of the actual selling price — better than RMSE suggests because a few large misses inflate RMSE.")
 
     st.markdown("---")
 
@@ -508,6 +692,9 @@ elif "Insights" in page:
     ax.set_xlim(0, imp_df["Importance"].max() * 1.18)
     st.pyplot(fig, use_container_width=True)
     plt.close(fig)
+    with st.popover("ℹ️ What does this show?", use_container_width=True):
+        st.markdown("**Feature Importance**")
+        st.markdown("Which inputs the RandomForest relied on most to predict discounts. A higher bar = that feature was used in more decision splits. **actual_price** and **discounted_price** dominate because the price ratio directly determines the discount — rating and review count add nuance.")
 
     st.markdown("---")
 
@@ -526,6 +713,9 @@ elif "Insights" in page:
         ax.legend(labelcolor=TEXT, facecolor=DARK, edgecolor=BORDER, fontsize=8)
         st.pyplot(fig, use_container_width=True)
         plt.close(fig)
+        with st.popover("ℹ️ What does this show?", use_container_width=True):
+            st.markdown("**Actual vs Predicted — Discount**")
+            st.markdown("Each dot is one product from the held-out test set. The x-axis is the real discount; the y-axis is what the model predicted. Dots along the red diagonal = perfect predictions. Scatter away from it = error. A tight cluster along the line means the model generalises well.")
 
     with c2:
         st.markdown("**Discounted Price ₹ (LinearRegression)**")
@@ -540,6 +730,9 @@ elif "Insights" in page:
         ax.legend(labelcolor=TEXT, facecolor=DARK, edgecolor=BORDER, fontsize=8)
         st.pyplot(fig, use_container_width=True)
         plt.close(fig)
+        with st.popover("ℹ️ What does this show?", use_container_width=True):
+            st.markdown("**Actual vs Predicted — Price**")
+            st.markdown("Same chart for the price model (top 3% of prices clipped so the main cluster is visible). Dots on the diagonal = accurate. Spread at higher prices reflects that premium products are harder to price precisely from just four features.")
 
     st.markdown("---")
 
@@ -557,6 +750,9 @@ elif "Insights" in page:
         ax.set_title("RF Residuals")
         st.pyplot(fig, use_container_width=True)
         plt.close(fig)
+        with st.popover("ℹ️ What does this show?", use_container_width=True):
+            st.markdown("**Discount Model Residuals**")
+            st.markdown("A residual is `actual − predicted` for each test product. A bell-shaped histogram centred on 0 (the red dashed line) means errors are random and symmetric — the model isn't systematically over- or under-predicting. That's a sign of a healthy, unbiased model.")
 
     with c2:
         residuals_lr = y_test_lr - y_pred_lr
@@ -569,6 +765,9 @@ elif "Insights" in page:
         ax.set_title("LR Residuals (2–98th pct)")
         st.pyplot(fig, use_container_width=True)
         plt.close(fig)
+        with st.popover("ℹ️ What does this show?", use_container_width=True):
+            st.markdown("**Price Model Residuals**")
+            st.markdown("Same idea for the price model, clipped at the 2nd–98th percentile to remove extreme outliers. Centred near 0 = good. A slight right skew would mean the model occasionally under-predicts high-end prices — worth watching if you're using this for premium product pricing.")
 
     st.markdown("---")
 
