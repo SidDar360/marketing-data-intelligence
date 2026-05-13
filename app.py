@@ -11,6 +11,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
+from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
+from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.model_selection import train_test_split
 
 matplotlib.use("Agg")
@@ -22,6 +24,59 @@ from src.data_preprocessing import (
     load_and_clean_data,
 )
 from src.models import check_drift, evaluate_model, load_model
+
+# ── Model registry ────────────────────────────────────────────────────────────
+_MODELS = {
+    "Linear Regression": {
+        "cls": LinearRegression, "params": {},
+        "speed": "⚡ Instant",
+        "desc": (
+            "Finds the best straight line (or flat plane) through the data. "
+            "Each feature gets a weight — the prediction is just a weighted sum of your inputs. "
+            "You can inspect exactly which factors matter and by how much."
+        ),
+        "pros": "Extremely fast, fully interpretable, great baseline.",
+        "cons": "Assumes a perfectly linear relationship — misses curves, thresholds, and feature interactions.",
+    },
+    "Ridge Regression": {
+        "cls": Ridge, "params": {"alpha": 1.0},
+        "speed": "⚡ Instant",
+        "desc": (
+            "Linear Regression with a built-in 'penalty' that shrinks large coefficients. "
+            "When two input features are correlated (e.g. actual price and discounted price move together), "
+            "Ridge handles that more gracefully than plain Linear Regression."
+        ),
+        "pros": "More stable than Linear Regression when features are correlated. Still fully interpretable.",
+        "cons": "Still linear — same ceiling on complexity as Linear Regression.",
+    },
+    "Random Forest": {
+        "cls": RandomForestRegressor, "params": {"n_estimators": 200, "random_state": 42},
+        "speed": "🕐 ~2 s",
+        "desc": (
+            "Trains hundreds of independent decision trees on random slices of the data, "
+            "then averages all their predictions. Each tree learns slightly different patterns, "
+            "so the group is much more robust and accurate than any single tree."
+        ),
+        "pros": "Handles non-linear patterns and feature interactions. Robust to outliers. Usually very accurate.",
+        "cons": "Slower to train. Hard to interpret — you can see feature importance but not exact decision rules.",
+    },
+    "Gradient Boosting": {
+        "cls": GradientBoostingRegressor,
+        "params": {"n_estimators": 200, "learning_rate": 0.1, "random_state": 42},
+        "speed": "🕐 ~3 s",
+        "desc": (
+            "Builds trees one at a time, where each new tree focuses on correcting the mistakes "
+            "of all the previous ones. This 'boosting' process squeezes out maximum accuracy "
+            "and is one of the top-performing algorithms for structured data."
+        ),
+        "pros": "Often the most accurate on tabular data. Systematically learns from its own errors.",
+        "cons": "Slowest to train. More sensitive to settings. Can overfit if not tuned carefully.",
+    },
+}
+
+_DISCOUNT_FEATURES = ["actual_price", "discounted_price", "rating", "rating_count"]
+_PRICE_FEATURES    = ["actual_price", "rating", "rating_count", "discount_percentage"]
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CSV_PATH = os.path.join(BASE_DIR, "amazon.csv")
@@ -154,6 +209,19 @@ def get_rf_model():
 @st.cache_resource
 def get_lr_model():
     return load_model("linear_regression_price")
+
+
+@st.cache_resource
+def train_dynamic_model(model_name: str, task: str):
+    df_tr = load_and_clean_data(CSV_PATH)
+    if task == "discount":
+        X, y = get_feature_target_for_discount(df_tr)
+    else:
+        X, y = get_feature_target_for_price(df_tr)
+    cfg = _MODELS[model_name]
+    m = cfg["cls"](**cfg["params"])
+    m.fit(X, y)
+    return m
 
 
 @st.cache_data
@@ -355,7 +423,22 @@ if "Overview" in page:
 # ══════════════════════════════════════════════════════════════════════════════
 elif "Discount" in page:
     st.title("🏷️ Predict Discount Percentage")
-    st.markdown("Adjust the product attributes — the RandomForest model predicts the discount in real-time.")
+    st.markdown("Choose a model, adjust the product attributes, and see the predicted discount in real-time.")
+    st.markdown("---")
+
+    # ── Model selector ─────────────────────────────────────────────────────
+    disc_model_name = st.selectbox(
+        "Model",
+        list(_MODELS.keys()),
+        index=2,   # Random Forest default
+        key="disc_model",
+    )
+    _dcfg = _MODELS[disc_model_name]
+    with st.expander(f"📖 What is {disc_model_name}?  {_dcfg['speed']}"):
+        st.markdown(_dcfg["desc"])
+        pc1, pc2 = st.columns(2)
+        pc1.success(f"✅ **Strengths:** {_dcfg['pros']}")
+        pc2.warning(f"⚠️ **Limitations:** {_dcfg['cons']}")
     st.markdown("---")
 
     col_in, col_out = st.columns([1, 1], gap="large")
@@ -383,9 +466,10 @@ elif "Discount" in page:
 
     with col_out:
         st.subheader("Prediction")
-        rf = get_rf_model()
+        with st.spinner(f"Running {disc_model_name}…"):
+            disc_model = train_dynamic_model(disc_model_name, "discount")
         feats = np.array([[actual_price, discounted_price, rating, float(rating_count)]])
-        pred = float(rf.predict(feats)[0])
+        pred = float(disc_model.predict(feats)[0])
         pred = np.clip(pred, 0.0, 100.0)
 
         # Big result
@@ -453,7 +537,22 @@ elif "Discount" in page:
 # ══════════════════════════════════════════════════════════════════════════════
 elif "Price" in page:
     st.title("💰 Predict Discounted Price")
-    st.markdown("Enter product details to forecast the selling price using the Linear Regression model.")
+    st.markdown("Choose a model, enter product details, and see the predicted selling price.")
+    st.markdown("---")
+
+    # ── Model selector ─────────────────────────────────────────────────────
+    price_model_name = st.selectbox(
+        "Model",
+        list(_MODELS.keys()),
+        index=0,   # Linear Regression default
+        key="price_model",
+    )
+    _pcfg = _MODELS[price_model_name]
+    with st.expander(f"📖 What is {price_model_name}?  {_pcfg['speed']}"):
+        st.markdown(_pcfg["desc"])
+        pc1, pc2 = st.columns(2)
+        pc1.success(f"✅ **Strengths:** {_pcfg['pros']}")
+        pc2.warning(f"⚠️ **Limitations:** {_pcfg['cons']}")
     st.markdown("---")
 
     col_in, col_out = st.columns([1, 1], gap="large")
@@ -467,9 +566,10 @@ elif "Price" in page:
 
     with col_out:
         st.subheader("Prediction")
-        lr = get_lr_model()
+        with st.spinner(f"Running {price_model_name}…"):
+            price_model = train_dynamic_model(price_model_name, "price")
         feats = np.array([[ap, rat, float(rat_cnt), disc_pct]])
-        pred_price = float(lr.predict(feats)[0])
+        pred_price = float(price_model.predict(feats)[0])
         formula_price = ap * (1 - disc_pct / 100)
 
         st.markdown(
@@ -494,20 +594,32 @@ elif "Price" in page:
                 st.markdown("Simple maths: `MRP × (1 − discount %)`. The model differs from this because real product prices are influenced by brand positioning, review volume, and category norms — not just the raw discount applied to MRP.")
 
         st.markdown("---")
-        st.subheader("Model Coefficients")
-        coef_df = pd.DataFrame(
-            {"Feature": ["actual_price", "rating", "rating_count", "discount_percentage"], "Coefficient": lr.coef_}
-        )
-        fig, ax = dark_fig(6, 3)
-        colors = [GREEN if c > 0 else RED for c in coef_df["Coefficient"]]
-        ax.barh(coef_df["Feature"], coef_df["Coefficient"], color=colors)
-        ax.axvline(0, color=TEXT, linewidth=0.8)
-        ax.set_xlabel("Coefficient value")
-        st.pyplot(fig, use_container_width=True)
-        plt.close(fig)
-        with st.popover("ℹ️ What does this show?", use_container_width=True):
-            st.markdown("**Model Coefficients**")
-            st.markdown("Each bar shows how much one feature shifts the predicted price. **Green (positive)** = higher value raises the predicted price. **Red (negative)** = higher value lowers it. The longer the bar, the stronger the influence. For example, a high `discount_percentage` is negative — more discount means lower selling price.")
+        if hasattr(price_model, "coef_"):
+            st.subheader("Model Coefficients")
+            coef_df = pd.DataFrame(
+                {"Feature": _PRICE_FEATURES, "Coefficient": price_model.coef_}
+            )
+            fig, ax = dark_fig(6, 3)
+            colors = [GREEN if c > 0 else RED for c in coef_df["Coefficient"]]
+            ax.barh(coef_df["Feature"], coef_df["Coefficient"], color=colors)
+            ax.axvline(0, color=TEXT, linewidth=0.8)
+            ax.set_xlabel("Coefficient value")
+            st.pyplot(fig, use_container_width=True)
+            plt.close(fig)
+            with st.popover("ℹ️ What does this show?", use_container_width=True):
+                st.markdown("**Model Coefficients**")
+                st.markdown("Each bar shows how much one feature shifts the predicted price. **Green (positive)** = higher value raises the predicted price. **Red (negative)** = higher value lowers it. The longer the bar, the stronger the influence. For example, a high `discount_percentage` is negative — more discount means lower selling price.")
+        elif hasattr(price_model, "feature_importances_"):
+            st.subheader("Feature Importance")
+            imp_df = pd.DataFrame({"Feature": _PRICE_FEATURES, "Importance": price_model.feature_importances_}).sort_values("Importance")
+            fig, ax = dark_fig(6, 3)
+            ax.barh(imp_df["Feature"], imp_df["Importance"], color=PURPLE, edgecolor=SURFACE)
+            ax.set_xlabel("Importance")
+            st.pyplot(fig, use_container_width=True)
+            plt.close(fig)
+            with st.popover("ℹ️ What does this show?", use_container_width=True):
+                st.markdown("**Feature Importance**")
+                st.markdown("Which inputs this model relied on most. A longer bar means that feature had more influence on the prediction.")
 
         st.markdown("---")
         st.subheader("Price Range in Dataset")
