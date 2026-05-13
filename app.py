@@ -202,7 +202,7 @@ with st.sidebar:
     st.markdown("---")
     page = st.radio(
         "Navigation",
-        ["🏠  Overview", "🏷️  Predict Discount", "💰  Predict Price", "🤖  AI Assistant", "📈  Model Insights"],
+        ["🏠  Overview", "🏷️  Predict Discount", "💰  Predict Price", "📈  Model Insights"],
         label_visibility="collapsed",
     )
     st.markdown("---")
@@ -522,105 +522,6 @@ elif "Price" in page:
         with st.popover("ℹ️ What does this show?", use_container_width=True):
             st.markdown("**Price Range Context**")
             st.markdown("The grey bars show the full spread of selling prices in the dataset (top 3% clipped). The green line marks your prediction. If the line is far from the main cluster, the model has seen fewer similar products and the prediction may be less accurate.")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# AI ASSISTANT
-# ══════════════════════════════════════════════════════════════════════════════
-elif "Assistant" in page:
-    st.title("🤖 AI Data Assistant")
-    st.markdown(
-        "Ask anything about the dataset, models, or predictions — answered in plain English."
-    )
-    st.markdown("---")
-
-    # ── API key ────────────────────────────────────────────────────────────
-    try:
-        api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
-    except Exception:
-        api_key = ""
-    api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
-
-    if not api_key:
-        st.error(
-            "**ANTHROPIC_API_KEY not set.**\n\n"
-            "**Running locally?** Create `.streamlit/secrets.toml` and add:\n"
-            "```\nANTHROPIC_API_KEY = \"sk-ant-...\"\n```\n\n"
-            "**Streamlit Cloud?** Go to your app → ⋮ menu → **Settings → Secrets** and add the key there."
-        )
-        st.stop()
-
-    import anthropic as _anthropic
-
-    _SYSTEM = """You are a helpful data analyst assistant for a Marketing Data Intelligence app.
-The app analyses an Amazon product dataset containing 1,465 products across 25+ categories.
-
-Key dataset facts:
-- Average discount: ~50% off original price
-- Average product rating: 4.1 / 5  (scale 1–5)
-- Median selling price: ₹999
-
-Two ML models are deployed:
-1. RandomForest  → predicts discount_percentage.  R²=0.967, RMSE=3.78pp, MAE=2.13pp
-2. LinearRegression → predicts discounted_price.  R²=0.951, RMSE=₹1200, MAE=₹733
-
-Features used by each model:
-- Discount model: actual_price, discounted_price, rating, rating_count
-- Price model:    actual_price, rating, rating_count, discount_percentage
-
-The app also detects input drift: if any input is >3 standard deviations from the training mean, a warning is shown.
-
-Answer in clear, simple language. Avoid jargon unless the user asks for technical depth. Keep answers concise."""
-
-    # ── Session state ──────────────────────────────────────────────────────
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-
-    # ── Example buttons (only shown when chat is empty) ────────────────────
-    if not st.session_state.messages:
-        st.markdown("**Try asking:**")
-        eq1, eq2, eq3, eq4 = st.columns(4)
-        _example = None
-        if eq1.button("What does R² mean?", use_container_width=True):
-            _example = "What does an R² score of 0.967 mean in plain English?"
-        if eq2.button("Why might my prediction be off?", use_container_width=True):
-            _example = "The model predicted a different discount than I expected. What could cause that?"
-        if eq3.button("When should I not trust the model?", use_container_width=True):
-            _example = "When should I not trust the predictions from these models?"
-        if eq4.button("What drives discounts most?", use_container_width=True):
-            _example = "Which product features have the biggest influence on the predicted discount?"
-        if _example:
-            st.session_state.messages.append({"role": "user", "content": _example})
-            st.rerun()
-
-    # ── Render conversation history ────────────────────────────────────────
-    for _msg in st.session_state.messages:
-        with st.chat_message(_msg["role"]):
-            st.markdown(_msg["content"])
-
-    # ── Clear button ───────────────────────────────────────────────────────
-    if st.session_state.messages:
-        if st.button("🗑️ Clear conversation", type="secondary"):
-            st.session_state.messages = []
-            st.rerun()
-
-    # ── Chat input & streamed response ─────────────────────────────────────
-    if _prompt := st.chat_input("Ask about the data, models, or predictions…"):
-        st.session_state.messages.append({"role": "user", "content": _prompt})
-        with st.chat_message("user"):
-            st.markdown(_prompt)
-
-        with st.chat_message("assistant"):
-            _client = _anthropic.Anthropic(api_key=api_key)
-            with _client.messages.stream(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=1024,
-                system=_SYSTEM,
-                messages=st.session_state.messages,
-            ) as _stream:
-                _response = st.write_stream(_stream.text_stream)
-
-        st.session_state.messages.append({"role": "assistant", "content": _response})
 
 
 # ══════════════════════════════════════════════════════════════════════════════
