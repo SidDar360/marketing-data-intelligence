@@ -345,9 +345,9 @@ def feature_selection_path(_df):
     while remaining:
         best, best_r2 = None, -1.0
         for f in remaining:
-            idx = [features.index(c) for c in selected + [f]]
-            m = LinearRegression().fit(X_tr[:, idx], y_tr)
-            r2 = float(m.score(X_te[:, idx], y_te))
+            cols = selected + [f]
+            m = LinearRegression().fit(X_tr[cols], y_tr)
+            r2 = float(m.score(X_te[cols], y_te))
             if r2 > best_r2:
                 best, best_r2 = f, r2
         selected.append(best)
