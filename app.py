@@ -77,6 +77,57 @@ _MODELS = {
 _DISCOUNT_FEATURES = ["actual_price", "discounted_price", "rating", "rating_count"]
 _PRICE_FEATURES    = ["actual_price", "rating", "rating_count", "discount_percentage"]
 
+# Per-model tunable parameters: (param_name, type, min, max, default, help_text)
+_TUNABLE = {
+    "Ridge Regression": [
+        ("alpha", "float", 0.01, 100.0, 1.0, 0.01,
+         "Regularization strength. Higher = smaller, more conservative coefficients."),
+    ],
+    "Random Forest": [
+        ("n_estimators", "int", 50, 500, 200, 10,
+         "Number of trees. More trees = stabler but slower."),
+        ("max_depth", "int_none", 0, 30, 0, 1,
+         "Maximum depth of each tree. 0 = unlimited (trees grow until leaves are pure)."),
+        ("min_samples_split", "int", 2, 20, 2, 1,
+         "Min samples required to split a node. Higher = simpler, less overfit trees."),
+    ],
+    "Gradient Boosting": [
+        ("n_estimators", "int", 50, 500, 200, 10,
+         "Number of boosting stages. More = better fit but slower and can overfit."),
+        ("learning_rate", "float", 0.01, 0.5, 0.1, 0.01,
+         "Shrinks each tree's contribution. Lower rate needs more trees."),
+        ("max_depth", "int", 2, 10, 3, 1,
+         "Max depth of each tree. Deeper = more complex, higher risk of overfitting."),
+    ],
+}
+
+
+def _model_param_ui(model_name: str, key_prefix: str) -> str:
+    """Render parameter sliders for `model_name` and return a JSON string of overrides."""
+    specs = _TUNABLE.get(model_name)
+    if not specs:
+        with st.expander("⚙️ Fine-tune parameters"):
+            st.info("Linear Regression has no tunable parameters — it finds the optimal weights analytically.")
+        return "{}"
+
+    params: dict = {}
+    with st.expander("⚙️ Fine-tune parameters"):
+        for param, ptype, lo, hi, default, step, help_text in specs:
+            wkey = f"params_{key_prefix}_{param}"
+            if ptype == "float":
+                val = st.slider(param, float(lo), float(hi), float(default), float(step),
+                                key=wkey, help=help_text)
+                params[param] = val
+            elif ptype == "int":
+                val = st.slider(param, int(lo), int(hi), int(default), int(step),
+                                key=wkey, help=help_text)
+                params[param] = val
+            elif ptype == "int_none":
+                val = st.slider(param, int(lo), int(hi), int(default), int(step),
+                                key=wkey, help=help_text)
+                params[param] = None if val == 0 else val
+    return json.dumps(params, sort_keys=True)
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CSV_PATH = os.path.join(BASE_DIR, "amazon.csv")
@@ -212,21 +263,22 @@ def get_lr_model():
 
 
 @st.cache_resource
-def train_dynamic_model(model_name: str, task: str):
+def train_dynamic_model(model_name: str, task: str, params_json: str = "{}"):
     df_tr = load_and_clean_data(CSV_PATH)
     if task == "discount":
         X, y = get_feature_target_for_discount(df_tr)
     else:
         X, y = get_feature_target_for_price(df_tr)
     cfg = _MODELS[model_name]
-    m = cfg["cls"](**cfg["params"])
+    merged = {**cfg["params"], **json.loads(params_json)}
+    m = cfg["cls"](**merged)
     m.fit(X, y)
     return m
 
 
 @st.cache_data
-def dynamic_test_predictions(_df, model_name: str, task: str):
-    model = train_dynamic_model(model_name, task)
+def dynamic_test_predictions(_df, model_name: str, task: str, params_json: str = "{}"):
+    model = train_dynamic_model(model_name, task, params_json)
     if task == "discount":
         X, y = get_feature_target_for_discount(_df)
     else:
@@ -452,6 +504,7 @@ elif "Discount" in page:
         pc1, pc2 = st.columns(2)
         pc1.success(f"✅ **Strengths:** {_dcfg['pros']}")
         pc2.warning(f"⚠️ **Limitations:** {_dcfg['cons']}")
+    disc_params_json = _model_param_ui(disc_model_name, "disc")
     st.markdown("---")
 
     col_in, col_out = st.columns([1, 1], gap="large")
@@ -480,7 +533,7 @@ elif "Discount" in page:
     with col_out:
         st.subheader("Prediction")
         with st.spinner(f"Running {disc_model_name}…"):
-            disc_model = train_dynamic_model(disc_model_name, "discount")
+            disc_model = train_dynamic_model(disc_model_name, "discount", disc_params_json)
         feats = np.array([[actual_price, discounted_price, rating, float(rating_count)]])
         pred = float(disc_model.predict(feats)[0])
         pred = np.clip(pred, 0.0, 100.0)
@@ -566,6 +619,7 @@ elif "Price" in page:
         pc1, pc2 = st.columns(2)
         pc1.success(f"✅ **Strengths:** {_pcfg['pros']}")
         pc2.warning(f"⚠️ **Limitations:** {_pcfg['cons']}")
+    price_params_json = _model_param_ui(price_model_name, "price")
     st.markdown("---")
 
     col_in, col_out = st.columns([1, 1], gap="large")
@@ -580,7 +634,7 @@ elif "Price" in page:
     with col_out:
         st.subheader("Prediction")
         with st.spinner(f"Running {price_model_name}…"):
-            price_model = train_dynamic_model(price_model_name, "price")
+            price_model = train_dynamic_model(price_model_name, "price", price_params_json)
         feats = np.array([[ap, rat, float(rat_cnt), disc_pct]])
         pred_price = float(price_model.predict(feats)[0])
         formula_price = ap * (1 - disc_pct / 100)
@@ -665,6 +719,7 @@ elif "Insights" in page:
             index=_model_names.index(st.session_state.get("disc_model", "Random Forest")),
             key="disc_model",
         )
+        ins_disc_params_json = _model_param_ui(ins_disc_model, "disc")
     with ic2:
         ins_price_model = st.selectbox(
             "Price model",
@@ -672,10 +727,11 @@ elif "Insights" in page:
             index=_model_names.index(st.session_state.get("price_model", "Linear Regression")),
             key="price_model",
         )
+        ins_price_params_json = _model_param_ui(ins_price_model, "price")
 
     with st.spinner("Computing evaluation metrics…"):
-        y_test_disc, y_pred_disc, disc_metrics = dynamic_test_predictions(df, ins_disc_model, "discount")
-        y_test_price, y_pred_price, price_metrics = dynamic_test_predictions(df, ins_price_model, "price")
+        y_test_disc, y_pred_disc, disc_metrics = dynamic_test_predictions(df, ins_disc_model, "discount", ins_disc_params_json)
+        y_test_price, y_pred_price, price_metrics = dynamic_test_predictions(df, ins_price_model, "price", ins_price_params_json)
 
     # ── Metrics cards ──────────────────────────────────────────────────────
     st.subheader("Evaluation Metrics")
@@ -722,7 +778,7 @@ elif "Insights" in page:
     st.markdown("---")
 
     # ── Feature importance / coefficients ──────────────────────────────────
-    disc_model_obj = train_dynamic_model(ins_disc_model, "discount")
+    disc_model_obj = train_dynamic_model(ins_disc_model, "discount", ins_disc_params_json)
     feature_names_disc = ["actual_price", "discounted_price", "rating", "rating_count"]
 
     if hasattr(disc_model_obj, "feature_importances_"):
