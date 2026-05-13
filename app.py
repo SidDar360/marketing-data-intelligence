@@ -10,6 +10,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 import streamlit as st
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
 from sklearn.linear_model import LinearRegression, Ridge
@@ -328,6 +329,33 @@ def lr_test_predictions(_df):
     return y_test.values, model.predict(X_test), evaluate_model(model, X_test, y_test)
 
 
+@st.cache_data
+def correlation_matrix(_df):
+    cols = ["actual_price", "discounted_price", "discount_percentage", "rating", "rating_count"]
+    return _df[cols].corr()
+
+
+@st.cache_data
+def feature_selection_path(_df):
+    """Greedy forward selection on discount features using LinearRegression."""
+    X_all, y = get_feature_target_for_discount(_df)
+    X_tr, X_te, y_tr, y_te = train_test_split(X_all, y, test_size=0.2, random_state=42)
+    features = list(_DISCOUNT_FEATURES)
+    selected, remaining, results = [], features[:], []
+    while remaining:
+        best, best_r2 = None, -1.0
+        for f in remaining:
+            cols = selected + [f]
+            m = LinearRegression().fit(X_tr[cols], y_tr)
+            r2 = float(m.score(X_te[cols], y_te))
+            if r2 > best_r2:
+                best, best_r2 = f, r2
+        selected.append(best)
+        remaining.remove(best)
+        results.append({"step": len(selected), "feature_added": best, "r2": best_r2})
+    return results
+
+
 def artifacts_ok():
     needed = ["random_forest_discount.pkl", "linear_regression_price.pkl", "training_stats.json"]
     return all(os.path.exists(os.path.join(ARTIFACTS_DIR, f)) for f in needed)
@@ -358,7 +386,7 @@ with st.sidebar:
     st.markdown("---")
     page = st.radio(
         "Navigation",
-        ["🏠  Overview", "🏷️  Predict Discount", "💰  Predict Price", "📈  Model Insights"],
+        ["🏠  Overview", "🔍  Feature Explorer", "🏷️  Predict Discount", "💰  Predict Price", "📈  Model Insights"],
         label_visibility="collapsed",
     )
     st.markdown("---")
@@ -509,6 +537,255 @@ if "Overview" in page:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# FEATURE EXPLORER
+# ══════════════════════════════════════════════════════════════════════════════
+elif "Explorer" in page:
+    st.title("🔍 Feature Explorer")
+    st.markdown("Understand how the dataset's features relate to each other and to the discount — before any model is involved.")
+    st.markdown("---")
+
+    corr = correlation_matrix(df)
+    _NUMERIC_COLS = ["actual_price", "discounted_price", "discount_percentage", "rating", "rating_count"]
+    _FEAT_LABELS = {
+        "actual_price": "Actual Price (MRP)",
+        "discounted_price": "Discounted Price",
+        "discount_percentage": "Discount %",
+        "rating": "Rating",
+        "rating_count": "Rating Count",
+    }
+    _FEAT_CONTEXT = {
+        "actual_price": "Premium products (higher MRP) are often discounted more aggressively to attract buyers.",
+        "discounted_price": "The selling price naturally moves with the discount — a lower selling price relative to MRP means a bigger discount.",
+        "rating": "Customer satisfaction and discount levels are linked — either high-rated products attract larger discounts, or discounts drive more purchases and reviews.",
+        "rating_count": "More popular products (more reviews) may face different pricing dynamics than niche ones.",
+    }
+
+    # ── Section 1: Correlation Heatmap ─────────────────────────────────────
+    st.subheader("Correlation Heatmap")
+    readable_labels = [_FEAT_LABELS.get(c, c) for c in _NUMERIC_COLS]
+    corr_display = corr.copy()
+    corr_display.index = readable_labels
+    corr_display.columns = readable_labels
+
+    fig, ax = dark_fig(9, 6)
+    sns.heatmap(
+        corr_display,
+        annot=True,
+        fmt=".2f",
+        cmap="coolwarm",
+        center=0,
+        vmin=-1,
+        vmax=1,
+        linewidths=0.5,
+        linecolor=SURFACE,
+        ax=ax,
+        annot_kws={"size": 10},
+        cbar_kws={"shrink": 0.8},
+    )
+    ax.tick_params(colors=TEXT, labelsize=9)
+    ax.set_xticklabels(ax.get_xticklabels(), rotation=30, ha="right", color=TEXT)
+    ax.set_yticklabels(ax.get_yticklabels(), rotation=0, color=TEXT)
+    ax.collections[0].colorbar.ax.tick_params(colors=TEXT)
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
+    with st.popover("ℹ️ How to read this", use_container_width=True):
+        st.markdown("**Correlation Matrix**")
+        st.markdown(
+            "Each cell shows the Pearson correlation (r) between two features. "
+            "**r = 1** — they move perfectly together. **r = −1** — when one goes up the other goes down. "
+            "**r ≈ 0** — no linear relationship. "
+            "Red = strong positive, blue = strong negative, white = no correlation. "
+            "The diagonal is always 1 (every feature is perfectly correlated with itself)."
+        )
+
+    with st.expander("🔢 How each number is calculated"):
+        st.markdown("#### The Pearson Correlation Formula")
+        st.markdown(
+            "Every cell value is computed using this formula:\n\n"
+            "$$r = \\frac{\\sum_{i=1}^{n}(x_i - \\bar{x})(y_i - \\bar{y})}"
+            "{\\sqrt{\\sum_{i=1}^{n}(x_i - \\bar{x})^2 \\;\\cdot\\; \\sum_{i=1}^{n}(y_i - \\bar{y})^2}}$$\n\n"
+            "Where **x** and **y** are the two features being compared, and the bar (x̄, ȳ) means the average."
+        )
+
+        st.markdown("#### What each part means")
+        st.markdown(
+            "| Part | What it does |\n"
+            "|------|--------------|\n"
+            "| $x_i - \\bar{x}$ | How far product *i*'s value is from the average (its deviation) |\n"
+            "| $(x_i - \\bar{x})(y_i - \\bar{y})$ | Multiply the two deviations together. Positive when both are above/below average simultaneously. |\n"
+            "| $\\sum$ (numerator) | Sum those products across all 1,465 products. Large positive sum → features tend to rise and fall together. |\n"
+            "| $\\sqrt{\\cdots}$ (denominator) | Scales the result to always land between −1 and +1, regardless of the units. |"
+        )
+
+        st.markdown("#### Worked example — 3 products")
+        st.markdown(
+            "Suppose we want the correlation between **Actual Price** and **Discount %** for 3 products:\n\n"
+            "| Product | Actual Price (₹) | Discount % |\n"
+            "|---------|-----------------|------------|\n"
+            "| A | 500 | 20 |\n"
+            "| B | 1 000 | 50 |\n"
+            "| C | 2 000 | 70 |\n\n"
+            "**Step 1 — Compute averages:**  \n"
+            "Mean price = (500 + 1000 + 2000) ÷ 3 = **1 167**  \n"
+            "Mean discount = (20 + 50 + 70) ÷ 3 = **46.7%**\n\n"
+            "**Step 2 — Compute deviations** (value − mean):\n\n"
+            "| Product | Price dev | Discount dev | Product of devs |\n"
+            "|---------|-----------|--------------|----------------|\n"
+            "| A | 500 − 1167 = **−667** | 20 − 46.7 = **−26.7** | (−667)(−26.7) = **+17 809** |\n"
+            "| B | 1000 − 1167 = **−167** | 50 − 46.7 = **+3.3** | (−167)(+3.3) = **−551** |\n"
+            "| C | 2000 − 1167 = **+833** | 70 − 46.7 = **+23.3** | (+833)(+23.3) = **+19 409** |\n\n"
+            "**Step 3 — Sum the products of deviations (numerator):**  \n"
+            "17 809 − 551 + 19 409 = **+36 667**  \n"
+            "Positive sum → the two features tend to move in the same direction.\n\n"
+            "**Step 4 — Compute the denominator (the scaling factor):**  \n"
+            "Price variance: (−667)² + (−167)² + (+833)² = 444 889 + 27 889 + 693 889 = 1 166 667  \n"
+            "Discount variance: (−26.7)² + (+3.3)² + (+23.3)² = 712.9 + 10.9 + 542.9 = 1 266.7  \n"
+            "Denominator = √(1 166 667 × 1 266.7) = **√1 477 477 889 ≈ 38 438**\n\n"
+            "**Step 5 — Divide:**  \n"
+            "r = 36 667 ÷ 38 438 ≈ **+0.95**  \n\n"
+            "This strong positive value confirms: in these 3 products, higher MRP → bigger discount. "
+            "The real dataset runs the same calculation across all **1,465 products** to produce each cell in the heatmap."
+        )
+
+        st.markdown("#### Why the diagonal is always 1.00")
+        st.markdown(
+            "When both features are the same (e.g. actual_price vs actual_price), "
+            "every deviation product $(x_i - \\bar{x})^2$ is always positive, and the numerator equals the denominator exactly — so r = 1."
+        )
+
+    st.markdown("---")
+
+    # ── Section 2: Plain-English Insights ─────────────────────────────────
+    st.subheader("What the Data Tells Us")
+    target_corr = corr["discount_percentage"].drop("discount_percentage").sort_values(key=abs, ascending=False)
+
+    for feat, r in target_corr.items():
+        strength = "strongly" if abs(r) > 0.6 else "moderately" if abs(r) > 0.3 else "weakly"
+        direction = "higher" if r > 0 else "lower"
+        polarity = "positively" if r > 0 else "negatively"
+        label = _FEAT_LABELS.get(feat, feat)
+        context = _FEAT_CONTEXT.get(feat, "")
+        msg = (
+            f"**{label}** is {strength} {polarity} correlated with discount (r = {r:+.2f}) — "
+            f"higher {label} tends to mean a **{direction} discount**. {context}"
+        )
+        if abs(r) > 0.6:
+            st.success(msg)
+        elif abs(r) > 0.3:
+            st.info(msg)
+        else:
+            st.warning(msg)
+
+    st.markdown("##### Feature-to-Feature Relationships")
+    pairs = []
+    for i, c1 in enumerate(_NUMERIC_COLS):
+        for j, c2 in enumerate(_NUMERIC_COLS):
+            if j <= i or c1 == "discount_percentage" or c2 == "discount_percentage":
+                continue
+            pairs.append((abs(corr.loc[c1, c2]), c1, c2, corr.loc[c1, c2]))
+    pairs.sort(reverse=True)
+    for _, c1, c2, r in pairs[:3]:
+        l1, l2 = _FEAT_LABELS.get(c1, c1), _FEAT_LABELS.get(c2, c2)
+        if abs(r) > 0.7:
+            st.warning(
+                f"⚠️ **{l1}** and **{l2}** are highly correlated (r = {r:+.2f}). "
+                "They carry overlapping information — but both contribute to computing the price ratio, so both are kept."
+            )
+        else:
+            st.info(f"**{l1}** and **{l2}**: r = {r:+.2f}.")
+
+    st.markdown("---")
+
+    # ── Section 3: Feature vs Discount bar chart ───────────────────────────
+    st.subheader("Each Feature's Correlation with Discount %")
+    bar_colors = [GREEN if v > 0 else RED for v in target_corr.values]
+    bar_labels = [_FEAT_LABELS.get(f, f) for f in target_corr.index]
+
+    fig, ax = dark_fig(8, 3)
+    bars = ax.barh(bar_labels, target_corr.values, color=bar_colors, edgecolor=SURFACE)
+    ax.axvline(0, color=TEXT, linewidth=0.8, linestyle="--")
+    ax.set_xlabel("Pearson r with Discount %")
+    for bar, val in zip(bars, target_corr.values):
+        xpos = val + 0.015 if val >= 0 else val - 0.015
+        ha = "left" if val >= 0 else "right"
+        ax.text(xpos, bar.get_y() + bar.get_height() / 2, f"{val:+.2f}", va="center", ha=ha, color=TEXT, fontsize=9)
+    spread = max(abs(target_corr.values)) * 1.3
+    ax.set_xlim(-spread, spread)
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
+    with st.popover("ℹ️ What does this show?", use_container_width=True):
+        st.markdown("**Feature–Target Correlation**")
+        st.markdown(
+            "Each bar is one input feature. The length shows how strongly that feature alone is linearly correlated with discount. "
+            "**Green** = higher value → higher discount. **Red** = higher value → lower discount. "
+            "A longer bar = stronger individual predictor. Note: features can still be useful in combination even if weak individually."
+        )
+
+    st.markdown("---")
+
+    # ── Section 4: Minimum Feature Analysis ───────────────────────────────
+    st.subheader("Minimum Features Needed to Predict Discount")
+    st.markdown(
+        "This adds one feature at a time — always choosing the feature that improves test R² the most — "
+        "to show how quickly predictive power is captured."
+    )
+
+    with st.spinner("Running feature selection…"):
+        path = feature_selection_path(df)
+
+    steps = [p["step"] for p in path]
+    r2s = [p["r2"] for p in path]
+    feats_added = [_FEAT_LABELS.get(p["feature_added"], p["feature_added"]) for p in path]
+    gains = [r2s[0]] + [r2s[i] - r2s[i - 1] for i in range(1, len(r2s))]
+
+    fig, ax = dark_fig(7, 3.5)
+    ax.plot(steps, r2s, marker="o", color=PURPLE, linewidth=2.5, markersize=8)
+    for x, y_val, feat in zip(steps, r2s, feats_added):
+        ax.annotate(
+            f"+ {feat}\nR²={y_val:.3f}",
+            (x, y_val),
+            textcoords="offset points",
+            xytext=(0, 14),
+            ha="center",
+            color=TEXT,
+            fontsize=8,
+        )
+    ax.set_xlabel("Number of features")
+    ax.set_ylabel("R² on test set")
+    ax.set_xticks(steps)
+    ax.set_ylim(0, 1.1)
+    ax.axhline(0.9, color=GREEN, linewidth=1, linestyle=":", alpha=0.7, label="R² = 0.90 threshold")
+    ax.legend(labelcolor=TEXT, facecolor=DARK, edgecolor=BORDER, fontsize=8)
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
+
+    tbl_df = pd.DataFrame({
+        "Step": steps,
+        "Feature added": feats_added,
+        "Cumulative R²": [f"{r:.4f}" for r in r2s],
+        "R² gain": [f"+{g:.4f}" for g in gains],
+    })
+    st.dataframe(tbl_df, use_container_width=True, hide_index=True)
+
+    threshold_step = next((p for p in path if p["r2"] >= 0.90), path[-1])
+    n_needed = threshold_step["step"]
+    r2_achieved = threshold_step["r2"]
+    top_feats = ", ".join(_FEAT_LABELS.get(path[i]["feature_added"], path[i]["feature_added"]) for i in range(n_needed))
+    st.success(
+        f"**{n_needed} feature{'s' if n_needed > 1 else ''} ({top_feats}) achieve R² = {r2_achieved:.3f}**, "
+        f"explaining {r2_achieved * 100:.1f}% of discount variation. "
+        f"Additional features provide diminishing returns."
+    )
+    with st.popover("ℹ️ What does this show?", use_container_width=True):
+        st.markdown("**Minimum Feature Analysis (Greedy Forward Selection)**")
+        st.markdown(
+            "Starts with no features. Each round adds whichever remaining feature improves test R² the most, using a fast Linear Regression. "
+            "The line shows how much predictive power you gain with each addition. "
+            "A flat tail means the last features overlap with existing ones or have low signal on their own."
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # PREDICT DISCOUNT
 # ══════════════════════════════════════════════════════════════════════════════
 elif "Discount" in page:
@@ -554,6 +831,19 @@ elif "Discount" in page:
             actual_price, discounted_price, rating, rating_count = 1999.0, 1199.0, 4.2, 5000
         if p3.button("Premium"):
             actual_price, discounted_price, rating, rating_count = 15000.0, 9999.0, 4.5, 20000
+
+        with st.expander("📖 Why these features?"):
+            _corr_disc = correlation_matrix(df)["discount_percentage"]
+            st.dataframe(
+                pd.DataFrame([
+                    {"Feature": "actual_price", "Role": "Original list price (MRP). Higher-priced products are often discounted more aggressively to attract buyers.", "r with Discount": f"{_corr_disc['actual_price']:+.2f}"},
+                    {"Feature": "discounted_price", "Role": "Selling price. Together with MRP it defines the price ratio — the most direct signal of discount depth.", "r with Discount": f"{_corr_disc['discounted_price']:+.2f}"},
+                    {"Feature": "rating", "Role": "Customer satisfaction (1–5). Links consumer perception to pricing strategy.", "r with Discount": f"{_corr_disc['rating']:+.2f}"},
+                    {"Feature": "rating_count", "Role": "Number of reviews — proxy for sales volume and product maturity.", "r with Discount": f"{_corr_disc['rating_count']:+.2f}"},
+                ]),
+                use_container_width=True,
+                hide_index=True,
+            )
 
     with col_out:
         st.subheader("Prediction")
@@ -655,6 +945,19 @@ elif "Price" in page:
         disc_pct = st.slider("Discount Percentage (%)", 0.0, 95.0, 40.0, 1.0)
         rat = st.slider("Rating", 1.0, 5.0, 4.0, 0.1)
         rat_cnt = st.number_input("Number of Ratings", min_value=1, max_value=500000, value=5000, step=100)
+
+        with st.expander("📖 Why these features?"):
+            _corr_price = correlation_matrix(df)["discounted_price"]
+            st.dataframe(
+                pd.DataFrame([
+                    {"Feature": "actual_price", "Role": "Original list price (MRP). The strongest predictor of selling price — higher MRP almost always means higher selling price.", "r with Price": f"{_corr_price['actual_price']:+.2f}"},
+                    {"Feature": "discount_percentage", "Role": "Discount applied. Directly determines how far below MRP the product sells.", "r with Price": f"{_corr_price['discount_percentage']:+.2f}"},
+                    {"Feature": "rating", "Role": "Customer satisfaction (1–5). Better-rated products can sustain higher prices.", "r with Price": f"{_corr_price['rating']:+.2f}"},
+                    {"Feature": "rating_count", "Role": "Number of reviews — proxy for sales volume. High-volume products face different price pressures.", "r with Price": f"{_corr_price['rating_count']:+.2f}"},
+                ]),
+                use_container_width=True,
+                hide_index=True,
+            )
 
     with col_out:
         st.subheader("Prediction")
