@@ -225,6 +225,17 @@ def train_dynamic_model(model_name: str, task: str):
 
 
 @st.cache_data
+def dynamic_test_predictions(_df, model_name: str, task: str):
+    model = train_dynamic_model(model_name, task)
+    if task == "discount":
+        X, y = get_feature_target_for_discount(_df)
+    else:
+        X, y = get_feature_target_for_price(_df)
+    _, X_test, _, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    return y_test.values, model.predict(X_test), evaluate_model(model, X_test, y_test)
+
+
+@st.cache_data
 def rf_test_predictions(_df):
     model = get_rf_model()
     X, y = get_feature_target_for_discount(_df)
@@ -397,13 +408,15 @@ if "Overview" in page:
 
     with c2:
         st.subheader("System Architecture")
+        _disc_sel = st.session_state.get("disc_model", "Random Forest")
+        _price_sel = st.session_state.get("price_model", "Linear Regression")
         st.markdown(
-            """
+            f"""
 | Component | Technology |
 |-----------|-----------|
 | Data | Amazon Sales CSV |
-| Discount model | Random Forest |
-| Price model | Linear Regression |
+| Discount model | {_disc_sel} |
+| Price model | {_price_sel} |
 | UI | Streamlit |
 """
         )
@@ -643,71 +656,102 @@ elif "Insights" in page:
     st.title("📈 Model Insights")
     st.markdown("---")
 
+    _model_names = list(_MODELS.keys())
+    ic1, ic2 = st.columns(2)
+    with ic1:
+        ins_disc_model = st.selectbox(
+            "Discount model",
+            _model_names,
+            index=_model_names.index(st.session_state.get("disc_model", "Random Forest")),
+            key="disc_model",
+        )
+    with ic2:
+        ins_price_model = st.selectbox(
+            "Price model",
+            _model_names,
+            index=_model_names.index(st.session_state.get("price_model", "Linear Regression")),
+            key="price_model",
+        )
+
     with st.spinner("Computing evaluation metrics…"):
-        y_test_rf, y_pred_rf, rf_metrics = rf_test_predictions(df)
-        y_test_lr, y_pred_lr, lr_metrics = lr_test_predictions(df)
+        y_test_disc, y_pred_disc, disc_metrics = dynamic_test_predictions(df, ins_disc_model, "discount")
+        y_test_price, y_pred_price, price_metrics = dynamic_test_predictions(df, ins_price_model, "price")
 
     # ── Metrics cards ──────────────────────────────────────────────────────
     st.subheader("Evaluation Metrics")
     c1, c2 = st.columns(2)
 
     with c1:
-        st.markdown("#### 🌲 RandomForest — Discount Prediction")
+        st.markdown(f"#### Discount — {ins_disc_model}")
         m1, m2, m3 = st.columns(3)
         with m1:
-            st.metric("R²", f"{rf_metrics['r2']:.4f}")
+            st.metric("R²", f"{disc_metrics['r2']:.4f}")
             with st.popover("ℹ️", use_container_width=True):
                 st.markdown("**R² (R-squared)**")
-                st.markdown("How much of the variation in discount percentages the model explains. 0 = no better than guessing the average; 1 = perfect. **0.967** means the model explains 96.7% of the variation — excellent.")
+                st.markdown("How much of the variation in discount percentages the model explains. 0 = no better than guessing the average; 1 = perfect. Closer to 1 is better.")
         with m2:
-            st.metric("RMSE", f"{rf_metrics['rmse']:.2f} pp")
+            st.metric("RMSE", f"{disc_metrics['rmse']:.2f} pp")
             with st.popover("ℹ️", use_container_width=True):
                 st.markdown("**RMSE (Root Mean Squared Error)**")
-                st.markdown("The typical size of prediction errors, in percentage points. **3.78 pp** means the model is off by about 3.78 percentage points on average. Larger errors are penalised more than smaller ones.")
+                st.markdown("Typical prediction error in percentage points. Larger errors are penalised more than smaller ones.")
         with m3:
-            st.metric("MAE", f"{rf_metrics['mae']:.2f} pp")
+            st.metric("MAE", f"{disc_metrics['mae']:.2f} pp")
             with st.popover("ℹ️", use_container_width=True):
                 st.markdown("**MAE (Mean Absolute Error)**")
-                st.markdown("The average absolute difference between predicted and actual discounts, in percentage points. **2.13 pp** means predictions are typically within ~2 points of the real value. Unlike RMSE, large errors aren't penalised extra.")
+                st.markdown("Average absolute difference between predicted and actual discounts, in percentage points. Unlike RMSE, large errors aren't penalised extra.")
 
     with c2:
-        st.markdown("#### 📉 LinearRegression — Price Prediction")
+        st.markdown(f"#### Price — {ins_price_model}")
         m1, m2, m3 = st.columns(3)
         with m1:
-            st.metric("R²", f"{lr_metrics['r2']:.4f}")
+            st.metric("R²", f"{price_metrics['r2']:.4f}")
             with st.popover("ℹ️", use_container_width=True):
                 st.markdown("**R² (R-squared)**")
-                st.markdown("How much of the variation in selling prices the model explains. **0.951** means 95.1% explained — very strong. The remaining 4.9% reflects factors not captured in the four input features.")
+                st.markdown("How much of the variation in selling prices the model explains. Closer to 1 is better.")
         with m2:
-            st.metric("RMSE", f"₹{lr_metrics['rmse']:.0f}")
+            st.metric("RMSE", f"₹{price_metrics['rmse']:.0f}")
             with st.popover("ℹ️", use_container_width=True):
                 st.markdown("**RMSE (Root Mean Squared Error)**")
-                st.markdown("Typical prediction error in rupees. **₹1,200** means the model's price estimates are off by about ₹1,200 on average. High-value products naturally have larger absolute errors.")
+                st.markdown("Typical prediction error in rupees. High-value products naturally have larger absolute errors.")
         with m3:
-            st.metric("MAE", f"₹{lr_metrics['mae']:.0f}")
+            st.metric("MAE", f"₹{price_metrics['mae']:.0f}")
             with st.popover("ℹ️", use_container_width=True):
                 st.markdown("**MAE (Mean Absolute Error)**")
-                st.markdown("Average absolute price prediction error. **₹733** means typical predictions are within ₹733 of the actual selling price — better than RMSE suggests because a few large misses inflate RMSE.")
+                st.markdown("Average absolute price prediction error. A few large misses can inflate RMSE more than MAE.")
 
     st.markdown("---")
 
-    # ── Feature importance ─────────────────────────────────────────────────
-    st.subheader("Feature Importance — RandomForest")
-    rf = get_rf_model()
-    feature_names = ["actual_price", "discounted_price", "rating", "rating_count"]
-    imp_df = pd.DataFrame({"Feature": feature_names, "Importance": rf.feature_importances_}).sort_values("Importance")
+    # ── Feature importance / coefficients ──────────────────────────────────
+    disc_model_obj = train_dynamic_model(ins_disc_model, "discount")
+    feature_names_disc = ["actual_price", "discounted_price", "rating", "rating_count"]
 
-    fig, ax = dark_fig(8, 3)
-    bars = ax.barh(imp_df["Feature"], imp_df["Importance"], color=PURPLE, edgecolor=SURFACE)
-    for bar, val in zip(bars, imp_df["Importance"]):
-        ax.text(val + 0.005, bar.get_y() + bar.get_height() / 2, f"{val:.3f}", va="center", color=TEXT, fontsize=9)
-    ax.set_xlabel("Importance")
-    ax.set_xlim(0, imp_df["Importance"].max() * 1.18)
-    st.pyplot(fig, use_container_width=True)
-    plt.close(fig)
-    with st.popover("ℹ️ What does this show?", use_container_width=True):
-        st.markdown("**Feature Importance**")
-        st.markdown("Which inputs the RandomForest relied on most to predict discounts. A higher bar = that feature was used in more decision splits. **actual_price** and **discounted_price** dominate because the price ratio directly determines the discount — rating and review count add nuance.")
+    if hasattr(disc_model_obj, "feature_importances_"):
+        st.subheader(f"Feature Importance — {ins_disc_model}")
+        imp_df = pd.DataFrame({"Feature": feature_names_disc, "Importance": disc_model_obj.feature_importances_}).sort_values("Importance")
+        fig, ax = dark_fig(8, 3)
+        bars = ax.barh(imp_df["Feature"], imp_df["Importance"], color=PURPLE, edgecolor=SURFACE)
+        for bar, val in zip(bars, imp_df["Importance"]):
+            ax.text(val + 0.005, bar.get_y() + bar.get_height() / 2, f"{val:.3f}", va="center", color=TEXT, fontsize=9)
+        ax.set_xlabel("Importance")
+        ax.set_xlim(0, imp_df["Importance"].max() * 1.18)
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+        with st.popover("ℹ️ What does this show?", use_container_width=True):
+            st.markdown("**Feature Importance**")
+            st.markdown("Which inputs the model relied on most to predict discounts. A higher bar = that feature drove more of the decision. Price features dominate because the price ratio directly determines the discount — rating and review count add nuance.")
+    elif hasattr(disc_model_obj, "coef_"):
+        st.subheader(f"Feature Coefficients — {ins_disc_model}")
+        coef_df = pd.DataFrame({"Feature": feature_names_disc, "Coefficient": disc_model_obj.coef_}).sort_values("Coefficient")
+        fig, ax = dark_fig(8, 3)
+        colors = [GREEN if v >= 0 else RED for v in coef_df["Coefficient"]]
+        bars = ax.barh(coef_df["Feature"], coef_df["Coefficient"], color=colors, edgecolor=SURFACE)
+        ax.axvline(0, color=TEXT, linewidth=0.8, linestyle="--")
+        ax.set_xlabel("Coefficient")
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+        with st.popover("ℹ️ What does this show?", use_container_width=True):
+            st.markdown("**Feature Coefficients**")
+            st.markdown("Each bar shows how much one unit increase in that feature changes the predicted discount. Green = raises the predicted discount; red = lowers it. Longer bar = stronger effect.")
 
     st.markdown("---")
 
@@ -716,10 +760,10 @@ elif "Insights" in page:
     c1, c2 = st.columns(2)
 
     with c1:
-        st.markdown("**Discount % (RandomForest)**")
+        st.markdown(f"**Discount % — {ins_disc_model}**")
         fig, ax = dark_fig(6, 4.5)
-        ax.scatter(y_test_rf, y_pred_rf, alpha=0.35, color=BLUE, s=18, label="Predictions")
-        mn, mx = min(y_test_rf.min(), y_pred_rf.min()), max(y_test_rf.max(), y_pred_rf.max())
+        ax.scatter(y_test_disc, y_pred_disc, alpha=0.35, color=BLUE, s=18, label="Predictions")
+        mn, mx = min(y_test_disc.min(), y_pred_disc.min()), max(y_test_disc.max(), y_pred_disc.max())
         ax.plot([mn, mx], [mn, mx], "--", color=RED, linewidth=1.5, label="Perfect fit")
         ax.set_xlabel("Actual Discount (%)")
         ax.set_ylabel("Predicted Discount (%)")
@@ -731,12 +775,12 @@ elif "Insights" in page:
             st.markdown("Each dot is one product from the held-out test set. The x-axis is the real discount; the y-axis is what the model predicted. Dots along the red diagonal = perfect predictions. Scatter away from it = error. A tight cluster along the line means the model generalises well.")
 
     with c2:
-        st.markdown("**Discounted Price ₹ (LinearRegression)**")
+        st.markdown(f"**Discounted Price ₹ — {ins_price_model}**")
         fig, ax = dark_fig(6, 4.5)
-        cap = np.percentile(y_test_lr, 97)
-        mask = (y_test_lr <= cap) & (y_pred_lr <= cap)
-        ax.scatter(y_test_lr[mask], y_pred_lr[mask], alpha=0.35, color=GREEN, s=18, label="Predictions")
-        mn, mx = y_test_lr[mask].min(), y_test_lr[mask].max()
+        cap = np.percentile(y_test_price, 97)
+        mask = (y_test_price <= cap) & (y_pred_price <= cap)
+        ax.scatter(y_test_price[mask], y_pred_price[mask], alpha=0.35, color=GREEN, s=18, label="Predictions")
+        mn, mx = y_test_price[mask].min(), y_test_price[mask].max()
         ax.plot([mn, mx], [mn, mx], "--", color=RED, linewidth=1.5, label="Perfect fit")
         ax.set_xlabel("Actual Price (₹)")
         ax.set_ylabel("Predicted Price (₹)")
@@ -754,13 +798,13 @@ elif "Insights" in page:
     c1, c2 = st.columns(2)
 
     with c1:
-        residuals_rf = y_test_rf - y_pred_rf
+        residuals_disc = y_test_disc - y_pred_disc
         fig, ax = dark_fig(6, 3.5)
-        ax.hist(residuals_rf, bins=40, color=PURPLE, edgecolor=SURFACE, linewidth=0.3)
+        ax.hist(residuals_disc, bins=40, color=PURPLE, edgecolor=SURFACE, linewidth=0.3)
         ax.axvline(0, color=RED, linewidth=1.5, linestyle="--")
         ax.set_xlabel("Residual (Actual − Predicted) %")
         ax.set_ylabel("Count")
-        ax.set_title("RF Residuals")
+        ax.set_title(f"{ins_disc_model} Residuals")
         st.pyplot(fig, use_container_width=True)
         plt.close(fig)
         with st.popover("ℹ️ What does this show?", use_container_width=True):
@@ -768,19 +812,19 @@ elif "Insights" in page:
             st.markdown("A residual is `actual − predicted` for each test product. A bell-shaped histogram centred on 0 (the red dashed line) means errors are random and symmetric — the model isn't systematically over- or under-predicting. That's a sign of a healthy, unbiased model.")
 
     with c2:
-        residuals_lr = y_test_lr - y_pred_lr
-        clipped_res = np.clip(residuals_lr, np.percentile(residuals_lr, 2), np.percentile(residuals_lr, 98))
+        residuals_price = y_test_price - y_pred_price
+        clipped_res = np.clip(residuals_price, np.percentile(residuals_price, 2), np.percentile(residuals_price, 98))
         fig, ax = dark_fig(6, 3.5)
         ax.hist(clipped_res, bins=40, color=GREEN, edgecolor=SURFACE, linewidth=0.3)
         ax.axvline(0, color=RED, linewidth=1.5, linestyle="--")
         ax.set_xlabel("Residual (Actual − Predicted) ₹")
         ax.set_ylabel("Count")
-        ax.set_title("LR Residuals (2–98th pct)")
+        ax.set_title(f"{ins_price_model} Residuals (2–98th pct)")
         st.pyplot(fig, use_container_width=True)
         plt.close(fig)
         with st.popover("ℹ️ What does this show?", use_container_width=True):
             st.markdown("**Price Model Residuals**")
-            st.markdown("Same idea for the price model, clipped at the 2nd–98th percentile to remove extreme outliers. Centred near 0 = good. A slight right skew would mean the model occasionally under-predicts high-end prices — worth watching if you're using this for premium product pricing.")
+            st.markdown("Same idea for the price model, clipped at the 2nd–98th percentile to remove extreme outliers. Centred near 0 = good. A slight right skew would mean the model occasionally under-predicts high-end prices.")
 
     st.markdown("---")
 
