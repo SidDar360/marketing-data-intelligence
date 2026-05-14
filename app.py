@@ -1,6 +1,28 @@
 """
 Marketing Data Intelligence — Streamlit Demo App
 Run: streamlit run app.py
+
+How this file is structured
+---------------------------
+1. Imports & constants      -- Third-party libraries, colour palette, file paths.
+2. Model registry           -- _MODELS dict: one entry per algorithm with its
+                               sklearn class, default hyperparams, and UI copy.
+3. Tunable-parameter spec   -- _TUNABLE dict: slider definitions for each model.
+4. Helper functions         -- dark_fig() for themed matplotlib figures,
+                               _model_param_ui() for the hyperparameter sliders.
+5. Cached loaders           -- @st.cache_resource / @st.cache_data functions that
+                               load data and train models once per session.
+6. Bootstrap                -- Auto-trains models on first run if artifacts are
+                               missing (needed for Streamlit Community Cloud).
+7. Page routing             -- if/elif blocks, one per sidebar page.
+
+Pages
+-----
+Overview        -- Dataset KPIs and exploratory charts.
+Feature Explorer-- Correlation heatmap, plain-English insights, feature selection.
+Predict Discount-- Live discount prediction with model selector + param tuning.
+Predict Price   -- Live price prediction with model selector + param tuning.
+Model Insights  -- Evaluation metrics, feature importance, residual plots.
 """
 import json
 import os
@@ -16,7 +38,10 @@ from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
 from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.model_selection import train_test_split
 
+# "Agg" is a non-interactive backend — required when matplotlib is used inside
+# a web server (Streamlit) where no display is available.
 matplotlib.use("Agg")
+# Allow "from src.xxx import ..." regardless of the working directory.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src.data_preprocessing import (
@@ -27,6 +52,14 @@ from src.data_preprocessing import (
 from src.models import check_drift, evaluate_model, load_model
 
 # ── Model registry ────────────────────────────────────────────────────────────
+# Each key is the display name shown in the selectbox.
+# Each value is a dict with:
+#   cls    -- the sklearn class to instantiate
+#   params -- default constructor kwargs (merged with user overrides at train time)
+#   speed  -- rough training time shown in the UI
+#   desc   -- plain-English explanation shown in the "What is X?" expander
+#   pros   -- strengths shown as a green info box
+#   cons   -- limitations shown as a yellow warning box
 _MODELS = {
     "Linear Regression": {
         "cls": LinearRegression, "params": {},
@@ -75,10 +108,21 @@ _MODELS = {
     },
 }
 
+# Features used to train each model.  Must stay in sync with the feature
+# extraction functions in src/data_preprocessing.py.
 _DISCOUNT_FEATURES = ["actual_price", "discounted_price", "rating", "rating_count"]
 _PRICE_FEATURES    = ["actual_price", "rating", "rating_count", "discount_percentage"]
 
-# Per-model tunable parameters: (param_name, type, min, max, default, step, short_help, explanation)
+# ── Hyperparameter tuning spec ────────────────────────────────────────────────
+# Each entry is a list of tuples, one per tunable parameter.
+# Tuple format: (param_name, type, min, max, default, step, short_help, explanation)
+#   param_name  -- kwarg name passed to the sklearn constructor
+#   type        -- "float", "int", or "int_none" (0 maps to Python None)
+#   min/max     -- slider range
+#   default     -- initial slider value (matches the _MODELS params default)
+#   step        -- slider increment
+#   short_help  -- tooltip shown on hover
+#   explanation -- always-visible caption rendered below the slider
 _TUNABLE = {
     "Ridge Regression": [
         ("alpha", "float", 0.01, 100.0, 1.0, 0.01,
@@ -125,7 +169,23 @@ _TUNABLE = {
 
 
 def _model_param_ui(model_name: str, key_prefix: str) -> str:
-    """Render parameter sliders for `model_name` and return a JSON string of overrides."""
+    """Render an '⚙️ Fine-tune parameters' expander and return user choices as JSON.
+
+    The returned JSON string is passed to train_dynamic_model() as `params_json`.
+    It is serialised rather than returned as a dict because @st.cache_resource
+    requires all arguments to be hashable — dicts are not, strings are.
+
+    Widget keys use `key_prefix` ("disc" or "price") so the same slider values
+    persist in session state and sync between the Predict page and Model Insights.
+
+    Args:
+        model_name: Key into _MODELS — determines which sliders to show.
+        key_prefix: "disc" for the discount model, "price" for the price model.
+
+    Returns:
+        JSON string of param overrides, e.g. '{"n_estimators": 100}'.
+        Returns '{}' for Linear Regression (no tunable params).
+    """
     specs = _TUNABLE.get(model_name)
     if not specs:
         with st.expander("⚙️ Fine-tune parameters"):
@@ -138,6 +198,8 @@ def _model_param_ui(model_name: str, key_prefix: str) -> str:
     params: dict = {}
     with st.expander("⚙️ Fine-tune parameters"):
         for param, ptype, lo, hi, default, step, short_help, explanation in specs:
+            # Widget key is scoped to the model task so discount and price sliders
+            # don't collide even when both pages are open in the same session.
             wkey = f"params_{key_prefix}_{param}"
             if ptype == "float":
                 val = st.slider(param, float(lo), float(hi), float(default), float(step),
@@ -148,6 +210,7 @@ def _model_param_ui(model_name: str, key_prefix: str) -> str:
                                 key=wkey, help=short_help)
                 params[param] = val
             elif ptype == "int_none":
+                # Slider value 0 maps to Python None (sklearn's "unlimited" sentinel).
                 val = st.slider(param, int(lo), int(hi), int(default), int(step),
                                 key=wkey, help=short_help)
                 params[param] = None if val == 0 else val
@@ -247,19 +310,34 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ── Matplotlib dark theme helper ──────────────────────────────────────────────
-DARK = "#1e1e2e"
-SURFACE = "#181825"
-BORDER = "#313244"
-TEXT = "#cdd6f4"
-PURPLE = "#cba6f7"
-BLUE = "#89b4fa"
-GREEN = "#a6e3a1"
-RED = "#f38ba8"
-PEACH = "#fab387"
+# ── Matplotlib dark theme ─────────────────────────────────────────────────────
+# Catppuccin Mocha palette — matches the CSS dark theme defined above so that
+# matplotlib charts blend seamlessly with the rest of the Streamlit UI.
+DARK   = "#1e1e2e"   # figure background
+SURFACE= "#181825"   # axes background (slightly darker than DARK)
+BORDER = "#313244"   # axis spines and grid lines
+TEXT   = "#cdd6f4"   # axis labels, tick marks, legend text
+PURPLE = "#cba6f7"   # primary highlight colour (used for key data series)
+BLUE   = "#89b4fa"   # secondary colour
+GREEN  = "#a6e3a1"   # positive values / success indicators
+RED    = "#f38ba8"   # negative values / error indicators
+PEACH  = "#fab387"   # warnings
 
 
 def dark_fig(w=7, h=4):
+    """Create a matplotlib Figure and Axes pre-styled to match the dark UI theme.
+
+    Every chart in the app calls this helper instead of plt.subplots() directly
+    so that background colours, axis colours, and spine colours are consistent
+    without repeating the same six lines everywhere.
+
+    Args:
+        w: Figure width in inches.
+        h: Figure height in inches.
+
+    Returns:
+        (fig, ax) tuple ready for plotting.
+    """
     fig, ax = plt.subplots(figsize=(w, h))
     fig.patch.set_facecolor(DARK)
     ax.set_facecolor(SURFACE)
@@ -272,30 +350,66 @@ def dark_fig(w=7, h=4):
     return fig, ax
 
 
-# ── Cached resource loaders ───────────────────────────────────────────────────
+# ── Cached loaders and trainers ───────────────────────────────────────────────
+# Streamlit re-runs the entire script on every user interaction.  Caching
+# prevents expensive work (disk I/O, model training) from repeating on each run.
+#
+# @st.cache_data   -- for functions that return plain data (DataFrames, arrays,
+#                     dicts).  Results are serialised and stored per argument
+#                     combination.  The leading underscore on a DataFrame arg
+#                     (e.g. _df) tells Streamlit to skip hashing that arg and
+#                     use object identity instead — DataFrames are unhashable.
+#
+# @st.cache_resource -- for heavyweight objects that should not be serialised
+#                       (sklearn models, database connections).  One instance is
+#                       shared across all user sessions for the lifetime of the
+#                       server process.
+
 @st.cache_data
 def get_data():
+    """Load and clean the Amazon CSV once per session."""
     return load_and_clean_data(CSV_PATH)
 
 
 @st.cache_resource
 def get_rf_model():
+    """Load the pre-trained RandomForest from artifacts/ (used by legacy paths)."""
     return load_model("random_forest_discount")
 
 
 @st.cache_resource
 def get_lr_model():
+    """Load the pre-trained LinearRegression from artifacts/ (used by legacy paths)."""
     return load_model("linear_regression_price")
 
 
 @st.cache_resource
 def train_dynamic_model(model_name: str, task: str, params_json: str = "{}"):
+    """Train a model from scratch and cache it by (model_name, task, params_json).
+
+    Called whenever the user picks a model or changes a hyperparameter slider.
+    Because the result is cached, switching back to a previously used combination
+    is instant — no retraining.
+
+    params_json is a JSON string (not a dict) because @st.cache_resource requires
+    all arguments to be hashable; plain dicts are not.
+
+    Args:
+        model_name: Key into _MODELS, e.g. "Random Forest".
+        task:       "discount" or "price" — selects the feature/target pair.
+        params_json: JSON string of hyperparameter overrides, e.g. '{"n_estimators": 100}'.
+                     Merged on top of the model's defaults from _MODELS.
+
+    Returns:
+        A fitted sklearn estimator ready to call .predict() on.
+    """
     df_tr = load_and_clean_data(CSV_PATH)
     if task == "discount":
         X, y = get_feature_target_for_discount(df_tr)
     else:
         X, y = get_feature_target_for_price(df_tr)
     cfg = _MODELS[model_name]
+    # Merge registry defaults with user overrides — overrides take precedence.
     merged = {**cfg["params"], **json.loads(params_json)}
     m = cfg["cls"](**merged)
     m.fit(X, y)
@@ -304,6 +418,14 @@ def train_dynamic_model(model_name: str, task: str, params_json: str = "{}"):
 
 @st.cache_data
 def dynamic_test_predictions(_df, model_name: str, task: str, params_json: str = "{}"):
+    """Return (y_test, y_pred, metrics) for the chosen model on the held-out test split.
+
+    Uses the same 80/20 random_state=42 split as train_dynamic_model so that
+    the test rows are never seen during training.
+
+    Returns:
+        (y_test, y_pred, metrics) where metrics is a dict with "r2", "rmse", "mae".
+    """
     model = train_dynamic_model(model_name, task, params_json)
     if task == "discount":
         X, y = get_feature_target_for_discount(_df)
@@ -315,6 +437,7 @@ def dynamic_test_predictions(_df, model_name: str, task: str, params_json: str =
 
 @st.cache_data
 def rf_test_predictions(_df):
+    """Test predictions for the artifact-trained RandomForest (legacy, used by older code paths)."""
     model = get_rf_model()
     X, y = get_feature_target_for_discount(_df)
     _, X_test, _, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
@@ -323,6 +446,7 @@ def rf_test_predictions(_df):
 
 @st.cache_data
 def lr_test_predictions(_df):
+    """Test predictions for the artifact-trained LinearRegression (legacy)."""
     model = get_lr_model()
     X, y = get_feature_target_for_price(_df)
     _, X_test, _, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
@@ -331,13 +455,28 @@ def lr_test_predictions(_df):
 
 @st.cache_data
 def correlation_matrix(_df):
+    """Compute and cache the Pearson correlation matrix for all five numeric features."""
     cols = ["actual_price", "discounted_price", "discount_percentage", "rating", "rating_count"]
     return _df[cols].corr()
 
 
 @st.cache_data
 def feature_selection_path(_df):
-    """Greedy forward selection on discount features using LinearRegression."""
+    """Run greedy forward selection and return the R² gain at each step.
+
+    Algorithm:
+    1. Start with an empty feature set.
+    2. Try adding each remaining feature using LinearRegression on the train split.
+    3. Permanently add whichever feature gave the highest test R².
+    4. Repeat until all _DISCOUNT_FEATURES have been added.
+
+    LinearRegression is used here (not the user-selected model) because it is
+    fast and deterministic — the goal is to measure raw feature signal, not to
+    match the prediction model.
+
+    Returns:
+        List of dicts: [{"step": 1, "feature_added": "...", "r2": 0.xx}, ...]
+    """
     X_all, y = get_feature_target_for_discount(_df)
     X_tr, X_te, y_tr, y_te = train_test_split(X_all, y, test_size=0.2, random_state=42)
     features = list(_DISCOUNT_FEATURES)
@@ -356,12 +495,24 @@ def feature_selection_path(_df):
     return results
 
 
-def artifacts_ok():
+def artifacts_ok() -> bool:
+    """Return True if all required model artifact files exist on disk.
+
+    The three files are produced by train.py (or by _run_training on first boot).
+    If any are missing the app triggers _run_training before rendering any page.
+    """
     needed = ["random_forest_discount.pkl", "linear_regression_price.pkl", "training_stats.json"]
     return all(os.path.exists(os.path.join(ARTIFACTS_DIR, f)) for f in needed)
 
 
 def _run_training():
+    """Train the baseline RF and LR models and save them to artifacts/.
+
+    Called automatically on the very first run (e.g. on Streamlit Community Cloud
+    where there is no local artifacts/ directory).  Imports are deferred inside
+    the function so that the top-level import block stays fast for normal runs
+    where artifacts already exist.
+    """
     from src.data_preprocessing import (
         get_feature_target_for_discount,
         get_feature_target_for_price,
@@ -374,13 +525,17 @@ def _run_training():
     X_disc, y_disc = get_feature_target_for_discount(df_train)
     rf, _ = train_random_forest(X_disc, y_disc)
     save_model(rf, "random_forest_discount")
+    # Training stats are used by check_drift() at inference time.
     save_training_stats(X_disc)
     X_price, y_price = get_feature_target_for_price(df_train)
     lr, _ = train_linear_regression(X_price, y_price)
     save_model(lr, "linear_regression_price")
 
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
+# ── Sidebar navigation ───────────────────────────────────────────────────────
+# `page` holds the selected radio label.  The page blocks below use `in` checks
+# (e.g. "Discount" in page) rather than exact equality so emoji prefixes don't
+# matter and the routing is resilient to label wording changes.
 with st.sidebar:
     st.markdown("## 📊 Marketing Data\nIntelligence")
     st.markdown("---")
@@ -393,11 +548,16 @@ with st.sidebar:
     if artifacts_ok():
         st.success("Models loaded ✅")
 
+# ── First-run bootstrap ───────────────────────────────────────────────────────
+# On Streamlit Community Cloud the artifacts/ directory doesn't exist until the
+# app runs for the first time.  This block trains the baseline models in the
+# background and then calls st.rerun() so the page renders with fresh data.
 if not artifacts_ok():
     with st.spinner("⚙️ First run — training models on the dataset (takes ~30 s)…"):
         _run_training()
     st.rerun()
 
+# Load the cleaned dataset once; all page blocks share this same DataFrame.
 df = get_data()
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -849,8 +1009,10 @@ elif "Discount" in page:
         st.subheader("Prediction")
         with st.spinner(f"Running {disc_model_name}…"):
             disc_model = train_dynamic_model(disc_model_name, "discount", disc_params_json)
+        # sklearn expects a 2-D array even for a single prediction row.
         feats = np.array([[actual_price, discounted_price, rating, float(rating_count)]])
         pred = float(disc_model.predict(feats)[0])
+        # Tree models can extrapolate slightly outside [0, 100] on unusual inputs.
         pred = np.clip(pred, 0.0, 100.0)
 
         # Big result
@@ -864,7 +1026,8 @@ elif "Discount" in page:
             st.markdown("The RandomForest model's estimate of what discount percentage this product would typically carry. It learned this from 1,465 Amazon products — similar price-to-rating combinations in the training data shape this number.")
         st.progress(int(pred))
 
-        # Implied vs actual discount
+        # Implied discount is pure arithmetic: (MRP - Selling Price) / MRP × 100.
+        # The model prediction often differs because it captures market patterns beyond the raw price ratio.
         implied = (1 - discounted_price / actual_price) * 100 if actual_price > 0 else 0.0
         colA, colB = st.columns(2)
         with colA:
@@ -878,7 +1041,11 @@ elif "Discount" in page:
                 st.markdown("**Implied by Prices**")
                 st.markdown("Simple maths: `(MRP − Selling Price) ÷ MRP × 100`. This is the literal discount if you were to list at exactly these two prices. The model prediction often differs because real-world discounts reflect market positioning, not just the price gap.")
 
-        # Drift
+        # Drift detection: check_drift() compares each input value against the training
+        # distribution (mean and std dev saved in training_stats.json).  It returns a dict
+        # with "drift_detected" (bool) and "z_scores" (per-feature z-score).  The threshold
+        # is 3.0 standard deviations — beyond that the input is in a region the model saw
+        # very rarely, so predictions carry higher uncertainty.
         drift = check_drift(
             {"actual_price": actual_price, "discounted_price": discounted_price,
              "rating": rating, "rating_count": float(rating_count)},
@@ -965,6 +1132,9 @@ elif "Price" in page:
             price_model = train_dynamic_model(price_model_name, "price", price_params_json)
         feats = np.array([[ap, rat, float(rat_cnt), disc_pct]])
         pred_price = float(price_model.predict(feats)[0])
+        # Formula price is the arithmetic baseline: MRP × (1 − discount/100).
+        # Comparing it to the model prediction highlights the non-linear market signals
+        # (brand, review volume, category) that the formula cannot capture.
         formula_price = ap * (1 - disc_pct / 100)
 
         st.markdown(
@@ -989,6 +1159,9 @@ elif "Price" in page:
                 st.markdown("Simple maths: `MRP × (1 − discount %)`. The model differs from this because real product prices are influenced by brand positioning, review volume, and category norms — not just the raw discount applied to MRP.")
 
         st.markdown("---")
+        # coef_ exists only on linear models (LinearRegression, Ridge).
+        # feature_importances_ exists only on tree-based models (RandomForest, GradientBoosting).
+        # Checking hasattr avoids a hard-coded model-type check and keeps the UI adaptive.
         if hasattr(price_model, "coef_"):
             st.subheader("Model Coefficients")
             coef_df = pd.DataFrame(
@@ -1041,6 +1214,9 @@ elif "Insights" in page:
     _model_names = list(_MODELS.keys())
     ic1, ic2 = st.columns(2)
     with ic1:
+        # key="disc_model" is shared with the Predict Discount page selectbox.
+        # Streamlit session state means whichever page the user visited last sets the
+        # initial value here — the two pages stay in sync without any extra wiring.
         ins_disc_model = st.selectbox(
             "Discount model",
             _model_names,
@@ -1049,6 +1225,7 @@ elif "Insights" in page:
         )
         ins_disc_params_json = _model_param_ui(ins_disc_model, "disc")
     with ic2:
+        # Same session state sharing for the price model.
         ins_price_model = st.selectbox(
             "Price model",
             _model_names,
@@ -1057,6 +1234,9 @@ elif "Insights" in page:
         )
         ins_price_params_json = _model_param_ui(ins_price_model, "price")
 
+    # params_json must be passed to both dynamic_test_predictions and train_dynamic_model
+    # so the cache key matches.  If they differed, the metrics would be computed with
+    # different hyperparameters than the model shown in the importance chart below.
     with st.spinner("Computing evaluation metrics…"):
         y_test_disc, y_pred_disc, disc_metrics = dynamic_test_predictions(df, ins_disc_model, "discount", ins_disc_params_json)
         y_test_price, y_pred_price, price_metrics = dynamic_test_predictions(df, ins_price_model, "price", ins_price_params_json)
@@ -1109,6 +1289,8 @@ elif "Insights" in page:
     disc_model_obj = train_dynamic_model(ins_disc_model, "discount", ins_disc_params_json)
     feature_names_disc = ["actual_price", "discounted_price", "rating", "rating_count"]
 
+    # Same adaptive hasattr check as on the Predict Price page — shows importances for tree
+    # models and coefficients for linear models without branching on model name.
     if hasattr(disc_model_obj, "feature_importances_"):
         st.subheader(f"Feature Importance — {ins_disc_model}")
         imp_df = pd.DataFrame({"Feature": feature_names_disc, "Importance": disc_model_obj.feature_importances_}).sort_values("Importance")
@@ -1197,6 +1379,8 @@ elif "Insights" in page:
 
     with c2:
         residuals_price = y_test_price - y_pred_price
+        # Clip to the 2nd–98th percentile so a handful of very expensive outliers don't
+        # collapse the histogram into a spike, hiding the shape of the main distribution.
         clipped_res = np.clip(residuals_price, np.percentile(residuals_price, 2), np.percentile(residuals_price, 98))
         fig, ax = dark_fig(6, 3.5)
         ax.hist(clipped_res, bins=40, color=GREEN, edgecolor=SURFACE, linewidth=0.3)
