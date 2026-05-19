@@ -45,8 +45,10 @@ matplotlib.use("Agg")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src.data_preprocessing import (
+    encode_category,
     get_feature_target_for_discount,
     get_feature_target_for_price,
+    get_top_level_category,
     load_and_clean_data,
 )
 from src.models import check_drift, evaluate_model, load_model
@@ -461,6 +463,30 @@ def correlation_matrix(_df):
 
 
 @st.cache_data
+def encode_category_cached(_df, method: str, target_col: str = "discount_percentage"):
+    """Encode the top-level product category and cache the result by (method, target_col).
+
+    Wraps ``src.data_preprocessing.encode_category`` so Streamlit only
+    re-encodes when the user changes the encoding method or target column —
+    not on every UI interaction.
+
+    The leading underscore on ``_df`` tells Streamlit's cache to use object
+    identity rather than hashing the DataFrame, which avoids the
+    ``UnhashableTypeError`` that plain ``df`` would raise.
+
+    Args:
+        _df: Cleaned dataset as returned by ``load_and_clean_data``.
+        method: Encoding method — ``"label"``, ``"frequency"``, ``"target"``,
+            or ``"onehot"``.
+        target_col: Column used as the target when ``method="target"``.
+
+    Returns:
+        ``(encoded_df, col_names)`` as returned by ``encode_category``.
+    """
+    return encode_category(_df, method, target_col)
+
+
+@st.cache_data
 def feature_selection_path(_df):
     """Run greedy forward selection and return the R² gain at each step.
 
@@ -704,30 +730,150 @@ elif "Explorer" in page:
     st.markdown("Understand how the dataset's features relate to each other and to the discount — before any model is involved.")
     st.markdown("---")
 
-    corr = correlation_matrix(df)
+    # ── Category encoding selector ──────────────────────────────────────────
+    # The raw ``category`` column is a pipe-separated string hierarchy.  It
+    # must be converted to numbers before it can enter a correlation matrix or
+    # a model.  The selector below controls which conversion strategy is used;
+    # the choice propagates through every chart on this page.
+    st.subheader("Category Encoding")
+    st.markdown(
+        "**category** stores a pipe-separated hierarchy such as  \n"
+        "`Computers&Accessories | Accessories&Peripherals | Cables&Accessories | …`  \n"
+        "Only the **top-level segment** is used here, giving **9 distinct groups**.  \n"
+        "Select an encoding method to include it in the heatmap and correlation analysis."
+    )
+
+    _ENC_LABELS = [
+        "None — numeric only",
+        "Label Encoding",
+        "Frequency Encoding",
+        "Target Encoding — Avg Discount %",
+        "Target Encoding — Avg Price ₹",
+        "One-Hot Encoding",
+    ]
+    enc_choice = st.radio("Encoding method", _ENC_LABELS, horizontal=True, key="cat_enc")
+
+    # Plain-English explanation for each encoding method.
+    _ENC_DESC = {
+        "None — numeric only": (
+            "The heatmap and correlation analysis use only the five numeric columns. "
+            "Use this as the baseline to compare against category-encoded variants."
+        ),
+        "Label Encoding": (
+            "**How it works:** Each of the 9 top-level categories is assigned a unique integer in "
+            "alphabetical order — *Car&Motorbike* = 0, *Computers&Accessories* = 1, *Electronics* = 2, "
+            "*Health&PersonalCare* = 3, and so on up to 8.  \n\n"
+            "**Strength:** One extra column, no additional memory, works out-of-the-box with any "
+            "sklearn estimator.  \n"
+            "**Weakness:** The integers imply a magnitude ordering that doesn't exist — a linear model "
+            "incorrectly treats *Electronics* (2) as 'twice as much' as *Car&Motorbike* (0). "
+            "Tree-based models (Random Forest, Gradient Boosting) are immune to this because they "
+            "split on arbitrary thresholds, not on the numeric magnitude."
+        ),
+        "Frequency Encoding": (
+            "**How it works:** Each category is replaced with its *proportion of all products*. "
+            "*Electronics* (526 products, ≈36 %) becomes 0.36; *Toys&Games* (1 product) becomes 0.0007.  \n\n"
+            "**Strength:** Captures 'how mainstream is this category?' without imposing an ordering. "
+            "Rare categories that behave unusually are distinguishable from dominant ones.  \n"
+            "**Weakness:** Two categories with identical product counts would collapse to the same "
+            "encoded value, making them indistinguishable to the model."
+        ),
+        "Target Encoding — Avg Discount %": (
+            "**How it works:** Each category is replaced with the *mean discount percentage* for all "
+            "products in that category — computed here on the full dataset for exploration.  \n\n"
+            "**Strength:** Highest single-feature correlation with the discount target. It directly "
+            "captures 'how aggressively does this category typically discount?'  \n"
+            "**Weakness:** Uses the target variable in the encoding — **data leakage** in production. "
+            "Real pipelines compute this mean only on the training fold (k-fold target encoding) to "
+            "prevent the model from seeing information about the test labels during training."
+        ),
+        "Target Encoding — Avg Price ₹": (
+            "**How it works:** Same as above but uses *mean discounted price* per category. "
+            "*Electronics* may average ₹1 500; USB cables may average ₹250.  \n\n"
+            "**Strength:** Captures category-level price positioning — naturally useful for the "
+            "price prediction model since it summarises typical price tiers.  \n"
+            "**Weakness:** Same data leakage caveat as discount target encoding."
+        ),
+        "One-Hot Encoding": (
+            "**How it works:** Creates **9 binary columns** — one per top-level category. "
+            "A product in *Electronics* has `cat_Electronics = 1` and all other category dummies = 0.  \n\n"
+            "**Strength:** No false ordering; each category's signal is captured independently. "
+            "Ideal for tree-based models that can freely split on any subset of dummies.  \n"
+            "**Weakness:** Adds 9 features instead of 1. For linear models the 9 dummies always "
+            "sum to 1 — perfect multicollinearity — so one dummy should be dropped. "
+            "Because OHE doesn't fit in a single heatmap cell, the main heatmap stays unchanged "
+            "and a dedicated **cross-correlation heatmap** (9 categories × 5 numeric features) "
+            "is shown below it."
+        ),
+    }
+
+    with st.expander(f"📖 About **{enc_choice}**", expanded=True):
+        st.markdown(_ENC_DESC[enc_choice])
+
+    st.markdown("---")
+
+    # ── Build augmented correlation matrix ─────────────────────────────────
+    # Maps each radio label to (method_str, target_col) or None for "no category".
+    _ENC_PARAMS = {
+        "None — numeric only":              None,
+        "Label Encoding":                   ("label",     "discount_percentage"),
+        "Frequency Encoding":               ("frequency", "discount_percentage"),
+        "Target Encoding — Avg Discount %": ("target",    "discount_percentage"),
+        "Target Encoding — Avg Price ₹":    ("target",    "discounted_price"),
+        "One-Hot Encoding":                 ("onehot",    "discount_percentage"),
+    }
+    enc_params = _ENC_PARAMS[enc_choice]
+
     _NUMERIC_COLS = ["actual_price", "discounted_price", "discount_percentage", "rating", "rating_count"]
+
+    # Human-readable labels for every possible column that may appear in the heatmap.
     _FEAT_LABELS = {
-        "actual_price": "Actual Price (MRP)",
-        "discounted_price": "Discounted Price",
+        "actual_price":        "Actual Price (MRP)",
+        "discounted_price":    "Discounted Price",
         "discount_percentage": "Discount %",
-        "rating": "Rating",
-        "rating_count": "Rating Count",
+        "rating":              "Rating",
+        "rating_count":        "Rating Count",
+        "category_label":      "Category (Label)",
+        "category_freq":       "Category (Frequency)",
+        "category_target":     "Category (Target)",
     }
+
+    # Plain-English context used in the "What the Data Tells Us" section.
     _FEAT_CONTEXT = {
-        "actual_price": "Premium products (higher MRP) are often discounted more aggressively to attract buyers.",
-        "discounted_price": "The selling price naturally moves with the discount — a lower selling price relative to MRP means a bigger discount.",
-        "rating": "Customer satisfaction and discount levels are linked — either high-rated products attract larger discounts, or discounts drive more purchases and reviews.",
-        "rating_count": "More popular products (more reviews) may face different pricing dynamics than niche ones.",
+        "actual_price":      "Premium products (higher MRP) are often discounted more aggressively to attract buyers.",
+        "discounted_price":  "The selling price naturally moves with the discount — a lower selling price relative to MRP means a bigger discount.",
+        "rating":            "Customer satisfaction and discount levels are linked — either high-rated products attract larger discounts, or discounts drive more purchases and reviews.",
+        "rating_count":      "More popular products (more reviews) may face different pricing dynamics than niche ones.",
+        "category_label":    "Integer codes are arbitrary alphabetical assignments — tree models discover meaningful splits regardless of ordering, but linear models may not extract full signal.",
+        "category_freq":     "Higher values mean a more-populated category. Captures how 'mainstream' a product type is within this dataset.",
+        "category_target":   "Directly encodes average pricing behaviour per category — the most predictive single-column representation, but uses the target variable in its construction.",
     }
+
+    # Build the correlation matrix and track which columns appear in the heatmap.
+    # OHE is handled separately below (9 dummy columns don't fit in a single cell).
+    is_ohe = enc_params is not None and enc_params[0] == "onehot"
+
+    if enc_params is None or is_ohe:
+        corr = correlation_matrix(df)
+        heatmap_cols = list(_NUMERIC_COLS)
+    else:
+        method, tgt = enc_params
+        enc_df, enc_col_names = encode_category_cached(df, method, tgt)
+        df_aug = df[_NUMERIC_COLS].copy()
+        for col in enc_col_names:
+            df_aug[col] = enc_df[col].values
+        corr = df_aug.corr()
+        heatmap_cols = list(_NUMERIC_COLS) + enc_col_names
 
     # ── Section 1: Correlation Heatmap ─────────────────────────────────────
     st.subheader("Correlation Heatmap")
-    readable_labels = [_FEAT_LABELS.get(c, c) for c in _NUMERIC_COLS]
+    readable_labels = [_FEAT_LABELS.get(c, c) for c in heatmap_cols]
     corr_display = corr.copy()
     corr_display.index = readable_labels
     corr_display.columns = readable_labels
 
-    fig, ax = dark_fig(9, 6)
+    n_cols = len(heatmap_cols)
+    fig, ax = dark_fig(10 if n_cols > 5 else 9, 6)
     sns.heatmap(
         corr_display,
         annot=True,
@@ -739,7 +885,7 @@ elif "Explorer" in page:
         linewidths=0.5,
         linecolor=SURFACE,
         ax=ax,
-        annot_kws={"size": 10},
+        annot_kws={"size": 9 if n_cols > 5 else 10},
         cbar_kws={"shrink": 0.8},
     )
     ax.tick_params(colors=TEXT, labelsize=9)
@@ -766,7 +912,6 @@ elif "Explorer" in page:
             "{\\sqrt{\\sum_{i=1}^{n}(x_i - \\bar{x})^2 \\;\\cdot\\; \\sum_{i=1}^{n}(y_i - \\bar{y})^2}}$$\n\n"
             "Where **x** and **y** are the two features being compared, and the bar (x̄, ȳ) means the average."
         )
-
         st.markdown("#### What each part means")
         st.markdown(
             "| Part | What it does |\n"
@@ -776,7 +921,6 @@ elif "Explorer" in page:
             "| $\\sum$ (numerator) | Sum those products across all 1,465 products. Large positive sum → features tend to rise and fall together. |\n"
             "| $\\sqrt{\\cdots}$ (denominator) | Scales the result to always land between −1 and +1, regardless of the units. |"
         )
-
         st.markdown("#### Worked example — 3 products")
         st.markdown(
             "Suppose we want the correlation between **Actual Price** and **Discount %** for 3 products:\n\n"
@@ -806,17 +950,81 @@ elif "Explorer" in page:
             "This strong positive value confirms: in these 3 products, higher MRP → bigger discount. "
             "The real dataset runs the same calculation across all **1,465 products** to produce each cell in the heatmap."
         )
-
         st.markdown("#### Why the diagonal is always 1.00")
         st.markdown(
             "When both features are the same (e.g. actual_price vs actual_price), "
             "every deviation product $(x_i - \\bar{x})^2$ is always positive, and the numerator equals the denominator exactly — so r = 1."
         )
 
+    # ── OHE cross-correlation heatmap ──────────────────────────────────────
+    # One-hot encoding produces 9 binary columns that don't fit as a single
+    # heatmap cell.  Instead we compute a cross-correlation matrix:
+    #   rows  = 9 category dummies
+    #   cols  = 5 numeric features
+    # This shows how each category's presence/absence relates to prices,
+    # ratings, and discount levels.
+    if is_ohe:
+        st.markdown("#### One-Hot Encoding — Category × Numeric Cross-Correlation")
+        st.markdown(
+            "Since one-hot encoding generates 9 binary columns the main heatmap above is "
+            "unchanged (5 numeric features only). The chart below shows a **cross-correlation** "
+            "heatmap: each **row** is a category dummy (1 = product belongs to that category, 0 = it doesn't), "
+            "each **column** is one of the 5 numeric features."
+        )
+        ohe_df, ohe_col_names = encode_category_cached(df, "onehot", "discount_percentage")
+        # Build a single DataFrame with both OHE dummies and numeric features, then
+        # slice the cross-correlation block we care about from the full corr matrix.
+        combined = pd.concat(
+            [ohe_df.reset_index(drop=True), df[_NUMERIC_COLS].reset_index(drop=True)],
+            axis=1,
+        )
+        full_ohe_corr = combined.corr()
+        cross_corr = full_ohe_corr.loc[ohe_col_names, _NUMERIC_COLS]
+
+        # Strip the "cat_" prefix for cleaner row labels.
+        row_labels = [c.replace("cat_", "") for c in ohe_col_names]
+        col_labels  = [_FEAT_LABELS.get(c, c) for c in _NUMERIC_COLS]
+
+        fig, ax = dark_fig(10, 5)
+        sns.heatmap(
+            cross_corr.values,
+            annot=True,
+            fmt=".2f",
+            cmap="coolwarm",
+            center=0,
+            vmin=-1,
+            vmax=1,
+            xticklabels=col_labels,
+            yticklabels=row_labels,
+            linewidths=0.5,
+            linecolor=SURFACE,
+            ax=ax,
+            annot_kws={"size": 9},
+            cbar_kws={"shrink": 0.8},
+        )
+        ax.tick_params(colors=TEXT, labelsize=9)
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=30, ha="right", color=TEXT)
+        ax.set_yticklabels(ax.get_yticklabels(), rotation=0, color=TEXT)
+        ax.collections[0].colorbar.ax.tick_params(colors=TEXT)
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+        with st.popover("ℹ️ How to read this", use_container_width=True):
+            st.markdown("**OHE Cross-Correlation Heatmap**")
+            st.markdown(
+                "Each row is a binary 0/1 indicator for one top-level category. "
+                "Each column is one of the five numeric features. "
+                "**Positive (red)** — products in that category tend to have *above-average* values for that feature. "
+                "**Negative (blue)** — products tend to fall *below average*. "
+                "For example, a red cell at *Electronics × Actual Price* means "
+                "Electronics products cost more than the overall dataset average."
+            )
+
     st.markdown("---")
 
     # ── Section 2: Plain-English Insights ─────────────────────────────────
     st.subheader("What the Data Tells Us")
+    # target_corr includes the encoded category column when one is present,
+    # giving an automatic plain-English summary for whichever encoding is active.
     target_corr = corr["discount_percentage"].drop("discount_percentage").sort_values(key=abs, ascending=False)
 
     for feat, r in target_corr.items():
@@ -838,8 +1046,8 @@ elif "Explorer" in page:
 
     st.markdown("##### Feature-to-Feature Relationships")
     pairs = []
-    for i, c1 in enumerate(_NUMERIC_COLS):
-        for j, c2 in enumerate(_NUMERIC_COLS):
+    for i, c1 in enumerate(heatmap_cols):
+        for j, c2 in enumerate(heatmap_cols):
             if j <= i or c1 == "discount_percentage" or c2 == "discount_percentage":
                 continue
             pairs.append((abs(corr.loc[c1, c2]), c1, c2, corr.loc[c1, c2]))
@@ -861,7 +1069,8 @@ elif "Explorer" in page:
     bar_colors = [GREEN if v > 0 else RED for v in target_corr.values]
     bar_labels = [_FEAT_LABELS.get(f, f) for f in target_corr.index]
 
-    fig, ax = dark_fig(8, 3)
+    # Grow chart height proportionally when extra features are present.
+    fig, ax = dark_fig(8, max(3.0, len(target_corr) * 0.6))
     bars = ax.barh(bar_labels, target_corr.values, color=bar_colors, edgecolor=SURFACE)
     ax.axvline(0, color=TEXT, linewidth=0.8, linestyle="--")
     ax.set_xlabel("Pearson r with Discount %")
@@ -883,7 +1092,7 @@ elif "Explorer" in page:
 
     st.markdown("---")
 
-    # ── Section 4: Minimum Feature Analysis ───────────────────────────────
+    # ── Section 4: Minimum Features Needed ────────────────────────────────
     st.subheader("Minimum Features Needed to Predict Discount")
     st.markdown(
         "This adds one feature at a time — always choosing the feature that improves test R² the most — "
@@ -943,6 +1152,90 @@ elif "Explorer" in page:
             "The line shows how much predictive power you gain with each addition. "
             "A flat tail means the last features overlap with existing ones or have low signal on their own."
         )
+
+    # ── Section 5: Category Deep-Dive ─────────────────────────────────────
+    # Raw per-category statistics — before encoding — so users can see the
+    # underlying distributions that each encoding method tries to capture.
+    st.markdown("---")
+    st.subheader("Category Analysis")
+    st.markdown(
+        "Raw category-level statistics *before* any encoding. These are the "
+        "ground-truth distributions that encoding methods attempt to summarise numerically. "
+        "Target encoding will approximate the 'Avg Discount %' or 'Avg Price ₹' columns; "
+        "frequency encoding will reflect the 'Products' column."
+    )
+
+    top_cat = get_top_level_category(df)
+    cat_stats = (
+        df.assign(top_category=top_cat)
+        .groupby("top_category")
+        .agg(
+            count=("discount_percentage", "count"),
+            avg_discount=("discount_percentage", "mean"),
+            avg_actual_price=("actual_price", "mean"),
+            avg_disc_price=("discounted_price", "mean"),
+            avg_rating=("rating", "mean"),
+        )
+        .sort_values("count", ascending=False)
+        .reset_index()
+    )
+
+    ch1, ch2 = st.columns(2)
+
+    with ch1:
+        st.markdown("**Avg Discount % by Category**")
+        fig, ax = dark_fig(6, 4)
+        sorted_d = cat_stats.sort_values("avg_discount", ascending=True)
+        bars = ax.barh(sorted_d["top_category"], sorted_d["avg_discount"], color=PURPLE, edgecolor=SURFACE)
+        for bar, val in zip(bars, sorted_d["avg_discount"]):
+            ax.text(val + 0.4, bar.get_y() + bar.get_height() / 2, f"{val:.1f}%", va="center", color=TEXT, fontsize=8)
+        ax.set_xlabel("Avg Discount %")
+        ax.set_xlim(0, sorted_d["avg_discount"].max() * 1.22)
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+        with st.popover("ℹ️ What does this show?", use_container_width=True):
+            st.markdown("**Average Discount % by Category**")
+            st.markdown(
+                "The typical discount level for products in each top-level category. "
+                "This is what *Target Encoding (Avg Discount %)* uses as the encoded value — "
+                "categories with longer bars get higher numeric representations."
+            )
+
+    with ch2:
+        st.markdown("**Avg Discounted Price ₹ by Category**")
+        fig, ax = dark_fig(6, 4)
+        sorted_p = cat_stats.sort_values("avg_disc_price", ascending=True)
+        bars = ax.barh(sorted_p["top_category"], sorted_p["avg_disc_price"], color=BLUE, edgecolor=SURFACE)
+        for bar, val in zip(bars, sorted_p["avg_disc_price"]):
+            ax.text(val + 15, bar.get_y() + bar.get_height() / 2, f"₹{val:,.0f}", va="center", color=TEXT, fontsize=8)
+        ax.set_xlabel("Avg Discounted Price (₹)")
+        ax.set_xlim(0, sorted_p["avg_disc_price"].max() * 1.22)
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+        with st.popover("ℹ️ What does this show?", use_container_width=True):
+            st.markdown("**Average Discounted Price by Category**")
+            st.markdown(
+                "The typical selling price per category. This is what *Target Encoding (Avg Price ₹)* uses — "
+                "higher-priced categories like Musical Instruments or Electronics get larger encoded values."
+            )
+
+    st.dataframe(
+        cat_stats.rename(columns={
+            "top_category": "Category",
+            "count":         "Products",
+            "avg_discount":  "Avg Discount %",
+            "avg_actual_price": "Avg MRP (₹)",
+            "avg_disc_price":   "Avg Price (₹)",
+            "avg_rating":       "Avg Rating",
+        }).style.format({
+            "Avg Discount %": "{:.1f}%",
+            "Avg MRP (₹)":    "₹{:,.0f}",
+            "Avg Price (₹)":  "₹{:,.0f}",
+            "Avg Rating":     "{:.2f}",
+        }),
+        use_container_width=True,
+        hide_index=True,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════

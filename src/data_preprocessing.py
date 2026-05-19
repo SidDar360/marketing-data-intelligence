@@ -211,3 +211,116 @@ def save_training_stats(X: pd.DataFrame, path: str | None = None) -> None:
         json.dump(stats, f, indent=2)
 
     print(f"Training stats saved to {path}")
+
+
+# ── Category encoding helpers ─────────────────────────────────────────────────
+
+def get_top_level_category(df: pd.DataFrame) -> pd.Series:
+    """Extract the first segment of the pipe-separated category hierarchy.
+
+    The raw ``category`` column stores a full path such as
+    ``"Computers&Accessories|Accessories&Peripherals|Cables&Accessories|…"``.
+    Only the first pipe-delimited segment is used here because it collapses
+    the full hierarchy into 9 mutually exclusive top-level groups that are
+    large enough to carry statistically meaningful signal.
+
+    Args:
+        df: Any DataFrame that contains a ``category`` column, as returned by
+            ``load_and_clean_data``.
+
+    Returns:
+        A ``pd.Series`` of top-level category strings with the same index as
+        *df*.  Rows with a missing ``category`` value are filled with
+        ``"Unknown"``.
+    """
+    return df["category"].fillna("Unknown").str.split("|").str[0]
+
+
+def encode_category(
+    df: pd.DataFrame,
+    method: str,
+    target_col: str = "discount_percentage",
+) -> tuple[pd.DataFrame, list[str]]:
+    """Encode the top-level product category as one or more numeric columns.
+
+    Four encoding strategies are supported.  Each converts the 9 categorical
+    labels (Electronics, Computers&Accessories, Home&Kitchen, …) into numbers
+    using a different philosophy, which produces different correlation signals
+    and model behaviours.
+
+    ``"label"``
+        Assigns each unique category an integer in alphabetical order
+        (Car&Motorbike = 0, Computers&Accessories = 1, Electronics = 2, …).
+        Fast and memory-efficient, but imposes an arbitrary magnitude ordering.
+        Tree models are immune to this artefact; linear models are not.
+
+    ``"frequency"``
+        Replaces each category with its proportion of all rows.  Electronics
+        (526 products, ≈36 %) becomes 0.36; Toys&Games (1 product) becomes
+        0.0007.  Captures 'market-size' signal without inventing an ordering.
+
+    ``"target"``
+        Replaces each category with the mean of *target_col* for all products
+        in that category.  Produces the highest individual correlation with the
+        target, but uses the target variable in the encoding — a data-leakage
+        risk in production pipelines where the mapping should be fitted only on
+        the training fold.
+
+    ``"onehot"``
+        Creates one binary dummy column per top-level category (9 columns
+        total).  No false ordering, each category's signal learned
+        independently.  Suitable for tree models; linear models should drop one
+        dummy to avoid perfect multicollinearity.
+
+    Args:
+        df: Cleaned DataFrame from ``load_and_clean_data``.
+        method: One of ``"label"``, ``"frequency"``, ``"target"``, ``"onehot"``.
+        target_col: Column whose per-category mean is used when
+            ``method="target"``.  Defaults to ``"discount_percentage"``; set to
+            ``"discounted_price"`` for price-oriented analysis.
+
+    Returns:
+        A tuple ``(encoded_df, col_names)`` where:
+
+        - ``encoded_df`` is a ``pd.DataFrame`` aligned to *df*'s index with one
+          column for label / frequency / target methods and nine columns for
+          one-hot encoding.
+        - ``col_names`` is a list of the column names added.
+
+    Raises:
+        ValueError: If *method* is not one of the four supported strings.
+    """
+    cat = get_top_level_category(df)
+
+    if method == "label":
+        # Sort alphabetically so codes are deterministic across Python sessions.
+        codes = pd.Categorical(cat, categories=sorted(cat.unique())).codes
+        return (
+            pd.DataFrame({"category_label": codes.astype(float)}, index=df.index),
+            ["category_label"],
+        )
+
+    if method == "frequency":
+        # normalize=True → proportions rather than raw counts, range 0–1.
+        freq_map = cat.value_counts(normalize=True)
+        return (
+            pd.DataFrame({"category_freq": cat.map(freq_map)}, index=df.index),
+            ["category_freq"],
+        )
+
+    if method == "target":
+        mean_map = df.groupby(cat)[target_col].mean()
+        return (
+            pd.DataFrame({"category_target": cat.map(mean_map)}, index=df.index),
+            ["category_target"],
+        )
+
+    if method == "onehot":
+        # astype(float) keeps values consistent with other numeric features.
+        dummies = pd.get_dummies(cat, prefix="cat").astype(float)
+        return dummies, list(dummies.columns)
+
+    raise ValueError(
+        f"Unknown category encoding method: {method!r}. "
+        "Choose one of 'label', 'frequency', 'target', 'onehot'."
+    )
