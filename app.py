@@ -894,6 +894,59 @@ elif "Explorer" in page:
     ax.collections[0].colorbar.ax.tick_params(colors=TEXT)
     st.pyplot(fig, use_container_width=True)
     plt.close(fig)
+
+    # ── Inline interpretation guide ─────────────────────────────────────────
+    # Always visible so users don't need to click anything to understand the chart.
+    st.markdown("**What the numbers mean**")
+    gi1, gi2, gi3 = st.columns(3)
+    with gi1:
+        st.success(
+            "**Positive — red cells (0 to +1)**  \n"
+            "Both features rise and fall together.  \n"
+            "**+1.00** = perfect positive link  \n"
+            "**+0.70+** = strong  \n"
+            "**+0.30–0.69** = moderate  \n"
+            "**< +0.30** = weak  \n\n"
+            "Higher values of one → higher values of the other."
+        )
+    with gi2:
+        st.info(
+            "**Near zero — white cells (−0.3 to +0.3)**  \n"
+            "No meaningful linear relationship.  \n"
+            "Knowing one feature's value tells you almost nothing about the other.  \n\n"
+            "The features may still interact non-linearly — tree models can detect this even when r ≈ 0."
+        )
+    with gi3:
+        st.error(
+            "**Negative — blue cells (−1 to 0)**  \n"
+            "As one feature rises, the other tends to fall.  \n"
+            "**−1.00** = perfect inverse link  \n"
+            "**−0.70+** = strong  \n"
+            "**−0.30–0.69** = moderate  \n"
+            "**> −0.30** = weak  \n\n"
+            "Higher values of one → lower values of the other."
+        )
+
+    # Dynamic sentence highlighting the strongest positive and negative
+    # relationships with discount % in whichever encoding is currently active.
+    _disc_corr_vals = corr["discount_percentage"].drop("discount_percentage")
+    _pos_feat = _disc_corr_vals.idxmax()
+    _neg_feat = _disc_corr_vals.idxmin()
+    _pos_r    = _disc_corr_vals[_pos_feat]
+    _neg_r    = _disc_corr_vals[_neg_feat]
+    _pos_lbl  = _FEAT_LABELS.get(_pos_feat, _pos_feat)
+    _neg_lbl  = _FEAT_LABELS.get(_neg_feat, _neg_feat)
+
+    _neg_sentence = (
+        f"The most negative is **{_neg_lbl}** (r = {_neg_r:+.2f}) — higher {_neg_lbl.lower()} → smaller discount."
+        if _neg_r < -0.1
+        else "No strong negative relationships exist in this view — all features correlate positively or near-zero with discount %."
+    )
+    st.caption(
+        f"In this heatmap: the strongest positive link with Discount % is **{_pos_lbl}** "
+        f"(r = {_pos_r:+.2f}) — higher {_pos_lbl.lower()} → larger discount. {_neg_sentence}"
+    )
+
     with st.popover("ℹ️ How to read this", use_container_width=True):
         st.markdown("**Correlation Matrix**")
         st.markdown(
