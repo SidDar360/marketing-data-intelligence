@@ -34,6 +34,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import streamlit as st
+from sklearn.decomposition import PCA
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
 from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.model_selection import train_test_split
@@ -50,6 +51,7 @@ from src.data_preprocessing import (
     get_feature_target_for_price,
     get_top_level_category,
     load_and_clean_data,
+    normalize_features,
 )
 from src.models import check_drift, evaluate_model, load_model
 
@@ -487,6 +489,40 @@ def encode_category_cached(_df, method: str, target_col: str = "discount_percent
 
 
 @st.cache_data
+def get_normalized_data(_df):
+    """Apply Min-Max normalization to the five numeric features and cache the result.
+
+    Wraps ``src.data_preprocessing.normalize_features`` so the scaling is
+    computed only once per session regardless of how many PCA charts are rendered.
+
+    Returns:
+        A ``pd.DataFrame`` of shape ``(n_products, 5)`` with all values in [0, 1].
+    """
+    return normalize_features(_df)
+
+
+@st.cache_data
+def get_pca_result(_norm_df, n_components: int = 5):
+    """Fit PCA on normalized data and cache the decomposition.
+
+    Args:
+        _norm_df: Normalized feature DataFrame from ``get_normalized_data``.
+        n_components: Number of principal components to compute.
+
+    Returns:
+        Tuple of:
+        - ``scores``      -- shape (n_products, n_components) — each product's
+                             coordinates in PCA space.
+        - ``components``  -- shape (n_components, n_features) — the loadings
+                             matrix (rows = PCs, cols = original features).
+        - ``explained``   -- 1-D array of explained variance ratios, one per PC.
+    """
+    pca = PCA(n_components=n_components, random_state=42)
+    scores = pca.fit_transform(_norm_df.values)
+    return scores, pca.components_, pca.explained_variance_ratio_
+
+
+@st.cache_data
 def feature_selection_path(_df):
     """Run greedy forward selection and return the R² gain at each step.
 
@@ -567,7 +603,7 @@ with st.sidebar:
     st.markdown("---")
     page = st.radio(
         "Navigation",
-        ["🏠  Overview", "🔍  Feature Explorer", "🏷️  Predict Discount", "💰  Predict Price", "📈  Model Insights"],
+        ["🏠  Overview", "🔍  Feature Explorer", "🔬  PCA Explorer", "🏷️  Predict Discount", "💰  Predict Price", "📈  Model Insights"],
         label_visibility="collapsed",
     )
     st.markdown("---")
@@ -1749,3 +1785,392 @@ elif "Insights" in page:
     stats_df = pd.DataFrame(stats).T
     stats_df.columns = ["Mean", "Std Dev"]
     st.dataframe(stats_df.style.format("{:.2f}"), use_container_width=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PCA EXPLORER
+# ══════════════════════════════════════════════════════════════════════════════
+elif "PCA" in page:
+    st.title("🔬 PCA Explorer")
+    st.markdown(
+        "**Principal Component Analysis (PCA)** is an automated technique that finds "
+        "new axes through your data — called *principal components* — along which the "
+        "data varies the most.  Unlike the greedy forward selection in Feature Explorer, "
+        "PCA requires **zero prior knowledge** about which features matter: it discovers "
+        "structure directly from the numbers.  \n\n"
+        "Before PCA can work fairly, every feature must live on the **same scale**.  "
+        "A feature measured in thousands of rupees would otherwise drown out one measured "
+        "in stars (1–5) — not because it carries more signal, but purely because of its unit."
+    )
+    st.markdown("---")
+
+    _PCA_FEAT_COLS   = ["actual_price", "discounted_price", "discount_percentage", "rating", "rating_count"]
+    _PCA_FEAT_LABELS = {
+        "actual_price":        "Actual Price",
+        "discounted_price":    "Discounted Price",
+        "discount_percentage": "Discount %",
+        "rating":              "Rating",
+        "rating_count":        "Rating Count",
+    }
+
+    # ── Step 1: Normalization ───────────────────────────────────────────────
+    st.subheader("Step 1 — Normalize the Features (Min-Max Scaling)")
+    st.markdown(
+        "**Why?**  The five numeric features span wildly different ranges:"
+    )
+
+    raw_df_pca = df[_PCA_FEAT_COLS].copy()
+    range_data = pd.DataFrame({
+        "Feature": [_PCA_FEAT_LABELS[c] for c in _PCA_FEAT_COLS],
+        "Min":  [raw_df_pca[c].min() for c in _PCA_FEAT_COLS],
+        "Max":  [raw_df_pca[c].max() for c in _PCA_FEAT_COLS],
+        "Range": [raw_df_pca[c].max() - raw_df_pca[c].min() for c in _PCA_FEAT_COLS],
+    })
+    st.dataframe(
+        range_data.style.format({"Min": "{:,.1f}", "Max": "{:,.1f}", "Range": "{:,.1f}"}),
+        use_container_width=True, hide_index=True,
+    )
+
+    st.markdown(
+        "Without normalization PCA would treat a ₹1 000 price difference as far more "
+        "'important' than a 1-star rating difference — purely because of the unit.  \n\n"
+        "**Min-Max scaling** maps every value to **[0, 1]**:  \n\n"
+        r"$$x_{\text{norm}} = \frac{x - x_{\min}}{x_{\max} - x_{\min}}$$"
+        "  \n\nAny value that falls below 0 (from floating-point precision or out-of-range "
+        "test inputs) is **clipped to 0** — negatives are removed.  "
+        "The result: all features contribute equally and PCA measures actual data structure, "
+        "not unit magnitude."
+    )
+
+    # Compute normalized data once, cache it.
+    norm_df_pca = get_normalized_data(df)
+
+    # Before / After distribution comparison using violin plots.
+    st.markdown("#### Before vs After Normalization")
+    bef, aft = st.columns(2)
+
+    with bef:
+        st.markdown("**Raw values — different scales**")
+        raw_melted = (
+            raw_df_pca
+            .rename(columns=_PCA_FEAT_LABELS)
+            .melt(var_name="Feature", value_name="Value")
+        )
+        # Clip extreme outliers for display only (top 2%) so the violin is readable.
+        raw_melted["Value"] = raw_melted.groupby("Feature")["Value"].transform(
+            lambda s: s.clip(upper=s.quantile(0.98))
+        )
+        fig, ax = dark_fig(6, 4.5)
+        sns.violinplot(data=raw_melted, y="Feature", x="Value", ax=ax,
+                       orient="h", color=PURPLE, linewidth=0.8, cut=0)
+        ax.set_xlabel("Raw value (top 2% clipped for display)")
+        ax.set_ylabel("")
+        ax.tick_params(colors=TEXT, labelsize=8)
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+
+    with aft:
+        st.markdown("**After Min-Max — all in [0, 1]**")
+        norm_melted = (
+            norm_df_pca
+            .rename(columns=_PCA_FEAT_LABELS)
+            .melt(var_name="Feature", value_name="Value")
+        )
+        fig, ax = dark_fig(6, 4.5)
+        sns.violinplot(data=norm_melted, y="Feature", x="Value", ax=ax,
+                       orient="h", color=GREEN, linewidth=0.8, cut=0)
+        ax.set_xlabel("Normalized value [0, 1]")
+        ax.set_ylabel("")
+        ax.set_xlim(-0.05, 1.05)
+        ax.tick_params(colors=TEXT, labelsize=8)
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+
+    with st.expander("🔢 Normalization stats — before vs after"):
+        sc1, sc2 = st.columns(2)
+        with sc1:
+            st.markdown("**Raw values**")
+            st.dataframe(
+                raw_df_pca.describe().loc[["min", "max", "mean", "std"]]
+                .rename(index={"min": "Min", "max": "Max", "mean": "Mean", "std": "Std"})
+                .rename(columns=_PCA_FEAT_LABELS)
+                .T.style.format("{:,.2f}"),
+                use_container_width=True,
+            )
+        with sc2:
+            st.markdown("**After Min-Max (negatives clipped to 0)**")
+            st.dataframe(
+                norm_df_pca.describe().loc[["min", "max", "mean", "std"]]
+                .rename(index={"min": "Min", "max": "Max", "mean": "Mean", "std": "Std"})
+                .rename(columns=_PCA_FEAT_LABELS)
+                .T.style.format("{:.4f}"),
+                use_container_width=True,
+            )
+
+    st.markdown("---")
+
+    # ── Step 2: PCA theory ─────────────────────────────────────────────────
+    st.subheader("Step 2 — What PCA Does")
+    st.markdown(
+        "Imagine your 5 features as 5 axes in a 5-dimensional space.  "
+        "Each product is a point in that space.  "
+        "PCA finds a new set of axes — **principal components (PCs)** — that are:  \n\n"
+        "1. **Oriented along maximum variance** — PC1 points in the direction where the "
+        "cloud of points is most spread out (most information).  "
+        "PC2 is the next most-spread direction that is perpendicular to PC1.  And so on.  \n"
+        "2. **Uncorrelated with each other** — each PC captures a unique, independent "
+        "slice of the data's variance.  \n"
+        "3. **Linear combinations of the originals** — each PC is a weighted sum of the "
+        "5 original features.  The weights are called **loadings**.  \n\n"
+        "Mathematically, PCA solves the eigendecomposition of the covariance matrix:  \n\n"
+        r"$$\Sigma \mathbf{v}_k = \lambda_k \mathbf{v}_k$$"
+        "  \n\nwhere **Σ** is the 5×5 feature covariance matrix, **v**_k is the loading vector "
+        "(direction) of the k-th component, and **λ**_k is its eigenvalue — proportional to the "
+        "variance captured.  The explained variance ratio for PC_k is:  \n\n"
+        r"$$\text{EVR}_k = \frac{\lambda_k}{\sum_j \lambda_j}$$"
+    )
+
+    # Fit PCA.
+    n_feats = len(_PCA_FEAT_COLS)
+    scores, components, explained = get_pca_result(norm_df_pca, n_feats)
+    cumulative = np.cumsum(explained)
+
+    # ── Step 3: Scree + Cumulative Variance ────────────────────────────────
+    st.subheader("Step 3 — How Much Variance Each Component Captures")
+    sc1, sc2 = st.columns(2)
+    pc_labels = [f"PC{i+1}" for i in range(n_feats)]
+
+    with sc1:
+        st.markdown("**Scree Plot**")
+        fig, ax = dark_fig(5, 3.5)
+        bars = ax.bar(pc_labels, explained * 100, color=PURPLE, edgecolor=SURFACE, zorder=3)
+        for bar, val in zip(bars, explained):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + 0.8,
+                f"{val*100:.1f}%",
+                ha="center", color=TEXT, fontsize=9,
+            )
+        ax.set_ylabel("Variance Explained (%)")
+        ax.set_xlabel("Principal Component")
+        ax.set_ylim(0, max(explained) * 100 * 1.25)
+        ax.grid(axis="y", color=BORDER, linewidth=0.5, zorder=0)
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+        with st.popover("ℹ️ What is a scree plot?", use_container_width=True):
+            st.markdown(
+                "Each bar shows how much of the total variance in the dataset that component "
+                "captures on its own. PC1 always has the most. The point where bars drop off "
+                "steeply (the 'elbow') suggests the useful number of components to keep."
+            )
+
+    with sc2:
+        st.markdown("**Cumulative Variance Explained**")
+        fig, ax = dark_fig(5, 3.5)
+        ax.plot(range(1, n_feats + 1), cumulative * 100,
+                marker="o", color=GREEN, linewidth=2.5, markersize=8, zorder=3)
+        ax.fill_between(range(1, n_feats + 1), cumulative * 100, alpha=0.12, color=GREEN)
+        ax.axhline(90, color=PEACH, linewidth=1.2, linestyle="--", label="90%")
+        ax.axhline(95, color=RED,   linewidth=1.2, linestyle="--", label="95%")
+        for i, (x, y_val) in enumerate(zip(range(1, n_feats + 1), cumulative * 100)):
+            ax.annotate(f"{y_val:.1f}%", (x, y_val), textcoords="offset points",
+                        xytext=(6, 4), color=TEXT, fontsize=8)
+        ax.set_ylabel("Cumulative Variance (%)")
+        ax.set_xlabel("Number of Components")
+        ax.set_xticks(range(1, n_feats + 1))
+        ax.set_xlim(0.5, n_feats + 0.5)
+        ax.set_ylim(0, 108)
+        ax.legend(labelcolor=TEXT, facecolor=DARK, edgecolor=BORDER, fontsize=8)
+        ax.grid(axis="y", color=BORDER, linewidth=0.5, zorder=0)
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+        with st.popover("ℹ️ How to use this?", use_container_width=True):
+            st.markdown(
+                "Find where the line crosses the 90% or 95% threshold — that tells you the "
+                "minimum number of components needed to retain that fraction of information. "
+                "Components beyond that threshold add diminishing returns."
+            )
+
+    # Summary callout
+    n_90 = int(np.argmax(cumulative >= 0.90)) + 1
+    n_95 = int(np.argmax(cumulative >= 0.95)) + 1
+    st.info(
+        f"**{n_90} component{'s' if n_90 > 1 else ''} capture ≥ 90% of all variance** "
+        f"({cumulative[n_90-1]*100:.1f}%).  "
+        f"**{n_95} component{'s' if n_95 > 1 else ''} capture ≥ 95%** "
+        f"({cumulative[n_95-1]*100:.1f}%).  "
+        f"The remaining {n_feats - n_95} component{'s' if n_feats - n_95 > 1 else ''} "
+        f"carry only {(1 - cumulative[n_95-1])*100:.1f}% of variance and can be dropped "
+        f"for a simpler model."
+    )
+
+    st.markdown("---")
+
+    # ── Step 4: Loadings heatmap ───────────────────────────────────────────
+    st.subheader("Step 4 — Feature Loadings")
+    st.markdown(
+        "**Loadings** are the weights that define each principal component.  \n"
+        "Each PC is a weighted sum of the original normalized features:  \n\n"
+        r"$$\text{PC}_k = w_{k,1}\,x_1 + w_{k,2}\,x_2 + \cdots + w_{k,5}\,x_5$$"
+        "  \n\n"
+        "| Loading value | Meaning |\n"
+        "|---------------|---------|\n"
+        "| **Large positive (dark red)** | Feature strongly pushes the PC score upward |\n"
+        "| **Large negative (dark blue)** | Feature strongly pushes the PC score downward |\n"
+        "| **Near zero (white)** | Feature barely influences this component |\n\n"
+        "Reading down a column tells you *what this component measures*.  "
+        "Reading across a row tells you *which components a feature contributes to*."
+    )
+
+    loadings_df = pd.DataFrame(
+        components.T,
+        index=[_PCA_FEAT_LABELS[c] for c in _PCA_FEAT_COLS],
+        columns=[f"PC{i+1}\n({explained[i]*100:.1f}%)" for i in range(n_feats)],
+    )
+    fig, ax = dark_fig(9, 5)
+    sns.heatmap(
+        loadings_df,
+        annot=True,
+        fmt=".2f",
+        cmap="coolwarm",
+        center=0,
+        vmin=-1,
+        vmax=1,
+        linewidths=0.5,
+        linecolor=SURFACE,
+        ax=ax,
+        annot_kws={"size": 11},
+        cbar_kws={"shrink": 0.8},
+    )
+    ax.set_title("Loadings — how each original feature contributes to each PC", color=TEXT, pad=12)
+    ax.tick_params(colors=TEXT, labelsize=9)
+    ax.set_xticklabels(ax.get_xticklabels(), rotation=0, color=TEXT)
+    ax.set_yticklabels(ax.get_yticklabels(), rotation=0, color=TEXT)
+    ax.collections[0].colorbar.ax.tick_params(colors=TEXT)
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
+
+    # Auto-generate plain-English interpretation for each PC.
+    st.markdown("#### Plain-English interpretation")
+    for i in range(n_feats):
+        pc_loads = components[i]
+        pos = sorted(
+            [(f, l) for f, l in zip(_PCA_FEAT_COLS, pc_loads) if l > 0.25],
+            key=lambda x: -x[1],
+        )
+        neg = sorted(
+            [(f, l) for f, l in zip(_PCA_FEAT_COLS, pc_loads) if l < -0.25],
+            key=lambda x: x[1],
+        )
+        pos_str = ", ".join(f"**{_PCA_FEAT_LABELS[f]}** ({l:+.2f})" for f, l in pos) or "none above threshold"
+        neg_str = ", ".join(f"**{_PCA_FEAT_LABELS[f]}** ({l:+.2f})" for f, l in neg) or "none above threshold"
+        pct = explained[i] * 100
+        msg = f"**PC{i+1}** ({pct:.1f}% variance) — rises with: {pos_str}. Falls with: {neg_str}."
+        if i == 0:
+            st.success(msg)
+        elif i == 1:
+            st.info(msg)
+        else:
+            st.warning(msg)
+
+    st.markdown("---")
+
+    # ── Step 5: Products in PCA Space ─────────────────────────────────────
+    st.subheader("Step 5 — Products Projected onto PCA Space")
+    st.markdown(
+        "Each product is now represented by its **PC1 and PC2 scores** — its coordinates "
+        "in the new compressed space.  Products close together in this chart share similar "
+        "patterns across all 5 original features.  "
+        "Colour shows the actual discount percentage so we can see whether PCA has "
+        "separated high-discount from low-discount products."
+    )
+
+    col_by = st.selectbox(
+        "Colour points by",
+        ["Discount %", "Actual Price", "Rating", "Rating Count"],
+        key="pca_color",
+    )
+    _color_col_map = {
+        "Discount %":    "discount_percentage",
+        "Actual Price":  "actual_price",
+        "Rating":        "rating",
+        "Rating Count":  "rating_count",
+    }
+    color_vals = df[_color_col_map[col_by]].values
+
+    fig, ax = dark_fig(9, 5.5)
+    sc = ax.scatter(
+        scores[:, 0], scores[:, 1],
+        c=color_vals, cmap="cool", alpha=0.45, s=16,
+    )
+    cbar = fig.colorbar(sc, ax=ax)
+    cbar.set_label(col_by, color=TEXT)
+    cbar.ax.yaxis.set_tick_params(color=TEXT)
+    plt.setp(cbar.ax.yaxis.get_ticklabels(), color=TEXT)
+    ax.set_xlabel(f"PC1 — {explained[0]*100:.1f}% of variance", color=TEXT)
+    ax.set_ylabel(f"PC2 — {explained[1]*100:.1f}% of variance", color=TEXT)
+    ax.set_title("Products in PCA space (PC1 vs PC2)", color=TEXT)
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
+    with st.popover("ℹ️ How to read this", use_container_width=True):
+        st.markdown(
+            "Each dot is one product placed by its PC1 (x) and PC2 (y) scores. "
+            "A clear colour gradient from left to right means PC1 tracks the selected variable well. "
+            "A random scatter of colours means PCA and the variable are weakly linked — "
+            "that variable's signal is spread across multiple components."
+        )
+
+    st.markdown("---")
+
+    # ── Step 6: PCA as Feature Selection ──────────────────────────────────
+    st.subheader("Step 6 — PCA as Automated Feature Selection")
+    st.markdown(
+        "How well can k PCA components predict discount percentage compared to the original features?  \n"
+        "We train a **Linear Regression** using the first k components and record test R².  \n"
+        "This quantifies the 'cost' of dimensionality reduction — how much predictive power "
+        "you lose (or gain, via reduced noise) when you replace the 5 original features with fewer PCs."
+    )
+
+    y_pca = df["discount_percentage"].values
+    X_tr_full, X_te_full, y_tr_pca, y_te_pca = train_test_split(
+        scores, y_pca, test_size=0.2, random_state=42
+    )
+
+    pca_sel_results = []
+    for k in range(1, n_feats + 1):
+        m = LinearRegression().fit(X_tr_full[:, :k], y_tr_pca)
+        r2 = float(m.score(X_te_full[:, :k], y_te_pca))
+        pca_sel_results.append({
+            "Components used": k,
+            "Features replaced": f"{k} PC{'s' if k > 1 else ''} → replaces all 5 features",
+            "Cumulative variance": f"{cumulative[k-1]*100:.1f}%",
+            "Test R²": round(r2, 4),
+        })
+
+    sel_df = pd.DataFrame(pca_sel_results)
+    st.dataframe(sel_df, use_container_width=True, hide_index=True)
+
+    # Line chart of R² vs number of PCs
+    fig, ax = dark_fig(7, 3.5)
+    k_vals = [r["Components used"] for r in pca_sel_results]
+    r2_vals = [r["Test R²"] for r in pca_sel_results]
+    ax.plot(k_vals, r2_vals, marker="o", color=PURPLE, linewidth=2.5, markersize=8)
+    for x, y_val in zip(k_vals, r2_vals):
+        ax.annotate(f"{y_val:.3f}", (x, y_val), textcoords="offset points",
+                    xytext=(0, 10), ha="center", color=TEXT, fontsize=8)
+    ax.set_xlabel("Number of PCA components used")
+    ax.set_ylabel("Test R²")
+    ax.set_xticks(k_vals)
+    ax.set_ylim(0, max(r2_vals) * 1.15)
+    ax.grid(axis="y", color=BORDER, linewidth=0.5)
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
+
+    best_pca = max(pca_sel_results, key=lambda x: x["Test R²"])
+    st.success(
+        f"**{best_pca['Components used']} PCA component{'s' if best_pca['Components used'] > 1 else ''}** "
+        f"(capturing {best_pca['Cumulative variance']} of variance) achieves the best "
+        f"test R² = **{best_pca['Test R²']:.4f}**.  \n"
+        "Compare this with the Feature Explorer's greedy selection — PCA is fully automatic, "
+        "requires no target variable, and can surface structure that hand-picked features miss."
+    )

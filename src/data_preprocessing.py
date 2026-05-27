@@ -324,3 +324,53 @@ def encode_category(
         f"Unknown category encoding method: {method!r}. "
         "Choose one of 'label', 'frequency', 'target', 'onehot'."
     )
+
+
+def normalize_features(
+    df: pd.DataFrame,
+    feature_cols: list | None = None,
+) -> pd.DataFrame:
+    """Apply Min-Max normalization to numeric feature columns, clipping negatives to 0.
+
+    Min-Max scaling maps every value to the range **[0, 1]** using:
+
+        x_norm = (x - x_min) / (x_max - x_min)
+
+    After scaling any value that lands below 0 (due to floating-point rounding
+    or test data falling outside the training range) is clipped to 0.
+    This is the standard preprocessing step required before PCA so that
+    features with large numeric ranges (e.g. ``rating_count`` up to 426 900)
+    do not dominate features with small ranges (e.g. ``rating`` 1–5).
+
+    Args:
+        df: Cleaned DataFrame from ``load_and_clean_data``.
+        feature_cols: Columns to normalize.  Defaults to the five numeric
+            model features when ``None``.
+
+    Returns:
+        A new ``pd.DataFrame`` containing only *feature_cols*, with every
+        value in **[0, 1]**.  The original *df* is not modified.
+    """
+    if feature_cols is None:
+        feature_cols = [
+            "actual_price",
+            "discounted_price",
+            "discount_percentage",
+            "rating",
+            "rating_count",
+        ]
+
+    df_norm = df[feature_cols].copy().astype(float)
+
+    for col in feature_cols:
+        col_min = df_norm[col].min()
+        col_max = df_norm[col].max()
+        if col_max > col_min:
+            df_norm[col] = (df_norm[col] - col_min) / (col_max - col_min)
+        else:
+            # Constant column — map everything to 0 (no variance to preserve).
+            df_norm[col] = 0.0
+
+    # Clip to [0, 1]: removes any floating-point negatives and values slightly
+    # above 1 that can arise from numeric precision.
+    return df_norm.clip(lower=0.0, upper=1.0)
