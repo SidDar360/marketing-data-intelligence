@@ -595,17 +595,26 @@ def _run_training():
 
 
 # ── Sidebar navigation ───────────────────────────────────────────────────────
-# `page` holds the selected radio label.  The page blocks below use `in` checks
-# (e.g. "Discount" in page) rather than exact equality so emoji prefixes don't
-# matter and the routing is resilient to label wording changes.
+# `page` is a stable ID derived from the selected radio option. Routing below
+# uses `page == "..."` rather than substring checks so two pages can't collide
+# (e.g. "Feature Explorer" vs "PCA Explorer" both contain "Explorer").
+_PAGES = [
+    ("overview", "🏠  Overview"),
+    ("feature",  "🔍  Feature Explorer"),
+    ("pca",      "🔬  PCA Explorer"),
+    ("discount", "🏷️  Predict Discount"),
+    ("price",    "💰  Predict Price"),
+    ("insights", "📈  Model Insights"),
+]
 with st.sidebar:
     st.markdown("## 📊 Marketing Data\nIntelligence")
     st.markdown("---")
-    page = st.radio(
+    _selected_label = st.radio(
         "Navigation",
-        ["🏠  Overview", "🔍  Feature Explorer", "🔬  PCA Explorer", "🏷️  Predict Discount", "💰  Predict Price", "📈  Model Insights"],
+        [lbl for _, lbl in _PAGES],
         label_visibility="collapsed",
     )
+    page = next(pid for pid, lbl in _PAGES if lbl == _selected_label)
     st.markdown("---")
     if artifacts_ok():
         st.success("Models loaded ✅")
@@ -625,7 +634,7 @@ df = get_data()
 # ══════════════════════════════════════════════════════════════════════════════
 # OVERVIEW
 # ══════════════════════════════════════════════════════════════════════════════
-if "Overview" in page:
+if page == "overview":
     st.title("Marketing Data Intelligence")
     st.markdown(
         "An end-to-end ML system for e-commerce analytics: "
@@ -761,7 +770,7 @@ if "Overview" in page:
 # ══════════════════════════════════════════════════════════════════════════════
 # FEATURE EXPLORER
 # ══════════════════════════════════════════════════════════════════════════════
-elif "Explorer" in page:
+elif page == "feature":
     st.title("🔍 Feature Explorer")
     st.markdown("Understand how the dataset's features relate to each other and to the discount — before any model is involved.")
     st.markdown("---")
@@ -1330,7 +1339,7 @@ elif "Explorer" in page:
 # ══════════════════════════════════════════════════════════════════════════════
 # PREDICT DISCOUNT
 # ══════════════════════════════════════════════════════════════════════════════
-elif "Discount" in page:
+elif page == "discount":
     st.title("🏷️ Predict Discount Percentage")
     st.markdown("Choose a model, adjust the product attributes, and see the predicted discount in real-time.")
     st.markdown("---")
@@ -1465,7 +1474,7 @@ elif "Discount" in page:
 # ══════════════════════════════════════════════════════════════════════════════
 # PREDICT PRICE
 # ══════════════════════════════════════════════════════════════════════════════
-elif "Price" in page:
+elif page == "price":
     st.title("💰 Predict Discounted Price")
     st.markdown("Choose a model, enter product details, and see the predicted selling price.")
     st.markdown("---")
@@ -1589,7 +1598,7 @@ elif "Price" in page:
 # ══════════════════════════════════════════════════════════════════════════════
 # MODEL INSIGHTS
 # ══════════════════════════════════════════════════════════════════════════════
-elif "Insights" in page:
+elif page == "insights":
     st.title("📈 Model Insights")
     st.markdown("---")
 
@@ -1790,7 +1799,7 @@ elif "Insights" in page:
 # ══════════════════════════════════════════════════════════════════════════════
 # PCA EXPLORER
 # ══════════════════════════════════════════════════════════════════════════════
-elif "PCA" in page:
+elif page == "pca":
     st.title("🔬 PCA Explorer")
     st.markdown(
         "**Principal Component Analysis (PCA)** is an automated technique that finds "
