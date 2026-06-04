@@ -2183,3 +2183,109 @@ elif page == "pca":
         "Compare this with the Feature Explorer's greedy selection — PCA is fully automatic, "
         "requires no target variable, and can surface structure that hand-picked features miss."
     )
+
+    st.markdown("---")
+
+    # ── Step 7: Which features actually drive discount %? ─────────────────
+    # We re-fit PCA on the four non-target features so discount % can't load
+    # itself trivially. Impact_j = Σ_k |loading_{k,j}| · |corr(PC_k, discount%)| · EVR_k.
+    st.subheader("Step 7 — Which Features Actually Impact Discount %?")
+    st.markdown(
+        "Steps 4–6 treat PCs as black boxes.  Here we collapse them back into a single "
+        "per-feature impact score on the target.\n\n"
+        "**Method.**  We re-fit PCA on the four **non-target** features so the target "
+        "doesn't trivially load itself.  For each driver feature *j*:  \n\n"
+        r"$$\text{impact}_j \;=\; \sum_{k}\,|w_{k,j}|\,\bigl|\rho(\text{PC}_k,\,\text{discount\%})\bigr|\,\text{EVR}_k$$"
+        "  \n\nLoadings say *how much each feature builds each PC*, correlations say "
+        "*how much each PC tracks discount %*, and EVR weights PCs by importance. "
+        "Sum across PCs, normalize → the share of discount-% signal each feature carries."
+    )
+
+    _TARGET       = "discount_percentage"
+    _DRIVER_COLS  = [c for c in _PCA_FEAT_COLS if c != _TARGET]
+    norm_drivers  = norm_df_pca[_DRIVER_COLS]
+
+    pca_drv     = PCA(n_components=len(_DRIVER_COLS), random_state=42)
+    drv_scores  = pca_drv.fit_transform(norm_drivers.values)
+    drv_load    = pca_drv.components_
+    drv_evr     = pca_drv.explained_variance_ratio_
+
+    target_vals = df[_TARGET].values
+    pc_target_r = np.array([
+        np.corrcoef(drv_scores[:, k], target_vals)[0, 1]
+        for k in range(drv_scores.shape[1])
+    ])
+
+    raw_impact = {}
+    pearson_r  = {}
+    for j, c in enumerate(_DRIVER_COLS):
+        raw_impact[c] = float(np.sum(np.abs(drv_load[:, j]) * np.abs(pc_target_r) * drv_evr))
+        pearson_r[c]  = float(np.corrcoef(df[c].values, target_vals)[0, 1])
+
+    total      = sum(raw_impact.values()) or 1.0
+    impact_pct = {c: raw_impact[c] / total * 100 for c in _DRIVER_COLS}
+    ranked     = sorted(_DRIVER_COLS, key=lambda c: impact_pct[c], reverse=True)
+
+    impact_df = pd.DataFrame({
+        "Rank":     range(1, len(ranked) + 1),
+        "Feature":  [_PCA_FEAT_LABELS[c] for c in ranked],
+        "Direction": [
+            "↑ raises discount %" if pearson_r[c] > 0 else "↓ lowers discount %"
+            for c in ranked
+        ],
+        "Pearson r vs discount %": [f"{pearson_r[c]:+.3f}" for c in ranked],
+        "PCA-weighted impact":     [f"{impact_pct[c]:.1f}%"   for c in ranked],
+    })
+    st.dataframe(impact_df, use_container_width=True, hide_index=True)
+
+    fig, ax = dark_fig(7, 3.5)
+    bar_features = [_PCA_FEAT_LABELS[c] for c in ranked][::-1]
+    bar_values   = [impact_pct[c] for c in ranked][::-1]
+    bar_colors   = [GREEN if pearson_r[c] > 0 else RED for c in ranked][::-1]
+    bars = ax.barh(bar_features, bar_values, color=bar_colors,
+                   edgecolor=SURFACE, zorder=3)
+    for bar, c in zip(bars, ranked[::-1]):
+        ax.text(bar.get_width() + 0.6, bar.get_y() + bar.get_height() / 2,
+                f"{impact_pct[c]:.1f}%", va="center", color=TEXT, fontsize=10)
+    ax.set_xlabel("PCA-weighted impact on discount % (share of total)")
+    ax.set_xlim(0, max(impact_pct.values()) * 1.25)
+    ax.tick_params(colors=TEXT)
+    ax.grid(axis="x", color=BORDER, linewidth=0.5, zorder=0)
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
+
+    # Anchor every sentence on "higher [feature]" and let the effect word carry
+    # the sign — keeps the direction unambiguous for both positive and negative r.
+    def _effect_word(c): return "larger" if pearson_r[c] > 0 else "smaller"
+
+    labels = [_PCA_FEAT_LABELS[c] for c in ranked]
+    sentences = [
+        f"**{labels[0]}** is the dominant driver of discount %, carrying "
+        f"**{impact_pct[ranked[0]]:.1f}%** of the PCA-weighted signal "
+        f"(Pearson r = {pearson_r[ranked[0]]:+.3f}). Products with "
+        f"higher {labels[0].lower()} receive "
+        f"{_effect_word(ranked[0])} discounts.",
+
+        f"**{labels[1]}** is the second-strongest driver at "
+        f"**{impact_pct[ranked[1]]:.1f}%** (r = {pearson_r[ranked[1]]:+.3f}) — "
+        f"higher {labels[1].lower()} → "
+        f"{_effect_word(ranked[1])} discount %.",
+
+        f"**{labels[2]}** has a secondary effect of "
+        f"**{impact_pct[ranked[2]]:.1f}%** (r = {pearson_r[ranked[2]]:+.3f}) — "
+        f"measurable but small.",
+
+        f"**{labels[3]}** is the weakest driver at "
+        f"**{impact_pct[ranked[3]]:.1f}%** (r = {pearson_r[ranked[3]]:+.3f}) — "
+        f"essentially noise in the PCA frame.",
+    ]
+
+    st.markdown("#### Bottom line")
+    for s in sentences:
+        st.markdown(f"- {s}")
+
+    st.caption(
+        "Impact % is each feature's relative contribution to the discount-% signal "
+        "after PCA reweighting. Direction (↑/↓) and Pearson r come from the raw "
+        "feature vs discount-% relationship and are independent of PCA sign conventions."
+    )
