@@ -887,8 +887,8 @@ elif page == "feature":
     _FEAT_CONTEXT = {
         "actual_price":      "Premium products (higher MRP) are often discounted more aggressively to attract buyers.",
         "discounted_price":  "The selling price naturally moves with the discount — a lower selling price relative to MRP means a bigger discount.",
-        "rating":            "Customer satisfaction and discount levels are linked — either high-rated products attract larger discounts, or discounts drive more purchases and reviews.",
-        "rating_count":      "More popular products (more reviews) may face different pricing dynamics than niche ones.",
+        "rating":            "Average star rating (1–5) — a **quality** signal. Customer satisfaction and discount levels are linked: either high-rated products attract larger discounts, or discounts drive more purchases and reviews.",
+        "rating_count":      "Number of customers who rated the product — a **popularity / volume** signal, distinct from rating quality. More-reviewed (mass-market) products often face different pricing dynamics than niche ones with few reviews.",
         "category_label":    "Integer codes are arbitrary alphabetical assignments — tree models discover meaningful splits regardless of ordering, but linear models may not extract full signal.",
         "category_freq":     "Higher values mean a more-populated category. Captures how 'mainstream' a product type is within this dataset.",
         "category_target":   "Directly encodes average pricing behaviour per category — the most predictive single-column representation, but uses the target variable in its construction.",
@@ -2237,6 +2237,21 @@ elif page == "pca":
         "PCA-weighted impact":     [f"{impact_pct[c]:.1f}%"   for c in ranked],
     })
     st.dataframe(impact_df, use_container_width=True, hide_index=True)
+
+    with st.expander("ℹ️ Rating vs Rating Count — what's the difference?"):
+        st.markdown(
+            "These two features look related but measure orthogonal things:\n\n"
+            "- **Rating** — the product's *average customer star rating* on a 1–5 scale "
+            f"(dataset range {df['rating'].min():.1f}–{df['rating'].max():.1f}, mean {df['rating'].mean():.2f}). "
+            "A **quality** signal: how satisfied buyers are.\n"
+            "- **Rating Count** — the *number of customers* who left a rating "
+            f"(dataset range {int(df['rating_count'].min()):,}–{int(df['rating_count'].max()):,}, "
+            f"median {int(df['rating_count'].median()):,}). "
+            "A **popularity / volume** signal: how many people have bought and reviewed.\n\n"
+            "They move independently. A 4.9-rated niche accessory can have 50 reviews; a 4.0-rated "
+            "bestseller can have 80,000. That's why the impact ranking treats them as separate "
+            "drivers — one captures *how good the product is*, the other *how widely it sells*."
+        )
 
     fig, ax = dark_fig(7, 3.5)
     bar_features = [_PCA_FEAT_LABELS[c] for c in ranked][::-1]
