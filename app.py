@@ -2187,14 +2187,20 @@ elif page == "pca":
     st.markdown("---")
 
     # ── Step 7: Which features actually drive discount %? ─────────────────
-    # We re-fit PCA on the four non-target features so discount % can't load
-    # itself trivially. Impact_j = Σ_k |loading_{k,j}| · |corr(PC_k, discount%)| · EVR_k.
+    # We re-fit PCA on the non-target features (four numerics + frequency-encoded
+    # category) so discount % can't load itself trivially.
+    # Impact_j = Σ_k |loading_{k,j}| · |corr(PC_k, discount%)| · EVR_k.
     st.subheader("Step 7 — Which Features Actually Impact Discount %?")
     st.markdown(
         "Steps 4–6 treat PCs as black boxes.  Here we collapse them back into a single "
-        "per-feature impact score on the target.\n\n"
-        "**Method.**  We re-fit PCA on the four **non-target** features so the target "
-        "doesn't trivially load itself.  For each driver feature *j*:  \n\n"
+        "per-feature impact score on the target — including **product category** alongside "
+        "the four numeric features.\n\n"
+        "**Method.**  We re-fit PCA on five **non-target** drivers so the target doesn't "
+        "trivially load itself.  Category is frequency-encoded (each row → the share of the "
+        "dataset its top-level category occupies) because it is the only category encoding "
+        "that is both single-column *and* fair to PCA: label encoding imposes an arbitrary "
+        "ordering, target encoding leaks discount %, and one-hot inflates dimensionality. "
+        "For each driver feature *j*:  \n\n"
         r"$$\text{impact}_j \;=\; \sum_{k}\,|w_{k,j}|\,\bigl|\rho(\text{PC}_k,\,\text{discount\%})\bigr|\,\text{EVR}_k$$"
         "  \n\nLoadings say *how much each feature builds each PC*, correlations say "
         "*how much each PC tracks discount %*, and EVR weights PCs by importance. "
@@ -2203,7 +2209,20 @@ elif page == "pca":
 
     _TARGET       = "discount_percentage"
     _DRIVER_COLS  = [c for c in _PCA_FEAT_COLS if c != _TARGET]
-    norm_drivers  = norm_df_pca[_DRIVER_COLS]
+
+    # Add category as a fifth driver via frequency encoding, then min-max scale
+    # it onto [0, 1] so it shares the same scale as the other normalized drivers.
+    _cat_df, _ = encode_category_cached(df, "frequency")
+    _cat_vals = _cat_df["category_freq"].values
+    _cat_norm = (_cat_vals - _cat_vals.min()) / max(_cat_vals.max() - _cat_vals.min(), 1e-9)
+
+    _DRIVER_COLS = _DRIVER_COLS + ["category_freq"]
+    _PCA_FEAT_LABELS = {**_PCA_FEAT_LABELS, "category_freq": "Category (Frequency)"}
+    norm_drivers = pd.concat(
+        [norm_df_pca[[c for c in _DRIVER_COLS if c != "category_freq"]],
+         pd.Series(_cat_norm, index=norm_df_pca.index, name="category_freq")],
+        axis=1,
+    )
 
     pca_drv     = PCA(n_components=len(_DRIVER_COLS), random_state=42)
     drv_scores  = pca_drv.fit_transform(norm_drivers.values)
@@ -2216,11 +2235,16 @@ elif page == "pca":
         for k in range(drv_scores.shape[1])
     ])
 
+    # Look up raw (pre-normalization) feature values for Pearson r. Numeric
+    # drivers live in df; category_freq comes from the encoded frame.
+    _raw_lookup = {c: df[c].values for c in _DRIVER_COLS if c != "category_freq"}
+    _raw_lookup["category_freq"] = _cat_vals
+
     raw_impact = {}
     pearson_r  = {}
     for j, c in enumerate(_DRIVER_COLS):
         raw_impact[c] = float(np.sum(np.abs(drv_load[:, j]) * np.abs(pc_target_r) * drv_evr))
-        pearson_r[c]  = float(np.corrcoef(df[c].values, target_vals)[0, 1])
+        pearson_r[c]  = float(np.corrcoef(_raw_lookup[c], target_vals)[0, 1])
 
     total      = sum(raw_impact.values()) or 1.0
     impact_pct = {c: raw_impact[c] / total * 100 for c in _DRIVER_COLS}
@@ -2286,12 +2310,17 @@ elif page == "pca":
         f"higher {labels[1].lower()} → "
         f"{_effect_word(ranked[1])} discount %.",
 
-        f"**{labels[2]}** has a secondary effect of "
+        f"**{labels[2]}** is the third-strongest driver at "
         f"**{impact_pct[ranked[2]]:.1f}%** (r = {pearson_r[ranked[2]]:+.3f}) — "
+        f"higher {labels[2].lower()} → "
+        f"{_effect_word(ranked[2])} discount %.",
+
+        f"**{labels[3]}** has a secondary effect of "
+        f"**{impact_pct[ranked[3]]:.1f}%** (r = {pearson_r[ranked[3]]:+.3f}) — "
         f"measurable but small.",
 
-        f"**{labels[3]}** is the weakest driver at "
-        f"**{impact_pct[ranked[3]]:.1f}%** (r = {pearson_r[ranked[3]]:+.3f}) — "
+        f"**{labels[4]}** is the weakest driver at "
+        f"**{impact_pct[ranked[4]]:.1f}%** (r = {pearson_r[ranked[4]]:+.3f}) — "
         f"essentially noise in the PCA frame.",
     ]
 
@@ -2303,4 +2332,111 @@ elif page == "pca":
         "Impact % is each feature's relative contribution to the discount-% signal "
         "after PCA reweighting. Direction (↑/↓) and Pearson r come from the raw "
         "feature vs discount-% relationship and are independent of PCA sign conventions."
+    )
+
+    st.markdown("---")
+
+    # ── Step 8: Which specific categories drive discount %? ───────────────
+    # Step 7 collapsed category into a single frequency-encoded driver. Here we
+    # unpack it: for each top-level category, compute mean discount % and the
+    # signed deviation from the overall dataset mean, then rank.
+    st.subheader("Step 8 — Which Specific Categories Drive Discount %?")
+    st.markdown(
+        "Step 7 treats category as a single number (its dataset frequency).  "
+        "That tells us *whether* category matters but not *which* categories matter.  "
+        "Here we group the dataset by top-level category and compare each category's "
+        "**mean discount %** against the dataset-wide mean, ranked by signed deviation. "
+        "Bars to the right of zero get larger-than-average discounts; bars to the left, smaller."
+    )
+
+    _top_cat = get_top_level_category(df)
+    _overall_mean = float(df[_TARGET].mean())
+    _cat_stats = (
+        pd.DataFrame({
+            "Category":    _top_cat,
+            "discount":    df[_TARGET].values,
+            "price":       df["actual_price"].values,
+        })
+        .groupby("Category")
+        .agg(
+            Products      = ("discount", "count"),
+            MeanDiscount  = ("discount", "mean"),
+            MeanPrice     = ("price",    "mean"),
+        )
+        .reset_index()
+    )
+    _cat_stats["Deviation"] = _cat_stats["MeanDiscount"] - _overall_mean
+    _cat_stats = _cat_stats.sort_values("Deviation", ascending=False).reset_index(drop=True)
+
+    # The 9 top-level categories are very unbalanced: a few have hundreds of
+    # products, several have only 1–2. Use a minimum sample size for the chart
+    # and definitive sentences so single-product categories don't drive claims.
+    _MIN_N = 10
+    _reliable = _cat_stats[_cat_stats["Products"] >= _MIN_N].reset_index(drop=True)
+
+    table = _cat_stats.assign(
+        **{
+            "Mean discount %":    _cat_stats["MeanDiscount"].map("{:.1f}%".format),
+            "Δ from overall":     _cat_stats["Deviation"].map(lambda x: f"{x:+.1f} pp"),
+            "Mean MRP (₹)":       _cat_stats["MeanPrice"].map("₹{:,.0f}".format),
+            "Sample reliable":    _cat_stats["Products"].map(lambda n: "✓" if n >= _MIN_N else "—"),
+        }
+    )[["Category", "Products", "Mean discount %", "Δ from overall", "Mean MRP (₹)", "Sample reliable"]]
+    st.dataframe(table, use_container_width=True, hide_index=True)
+
+    fig, ax = dark_fig(7, max(3.5, 0.55 * len(_reliable) + 1))
+    cats_plot = _reliable["Category"].tolist()[::-1]
+    devs_plot = _reliable["Deviation"].tolist()[::-1]
+    colors_plot = [GREEN if d > 0 else RED for d in devs_plot]
+    bars = ax.barh(cats_plot, devs_plot, color=colors_plot,
+                   edgecolor=SURFACE, zorder=3)
+    for bar, d in zip(bars, devs_plot):
+        x_off = 0.4 if d >= 0 else -0.4
+        ax.text(bar.get_width() + x_off, bar.get_y() + bar.get_height() / 2,
+                f"{d:+.1f} pp", va="center",
+                ha="left" if d >= 0 else "right",
+                color=TEXT, fontsize=9)
+    ax.axvline(0, color=BORDER, linewidth=1)
+    ax.set_xlabel("Deviation from overall mean discount (percentage points)")
+    _max_abs = max(abs(min(devs_plot)), abs(max(devs_plot))) * 1.4 + 1
+    ax.set_xlim(-_max_abs, _max_abs)
+    ax.tick_params(colors=TEXT)
+    ax.grid(axis="x", color=BORDER, linewidth=0.5, zorder=0)
+    ax.set_title(f"Categories with ≥ {_MIN_N} products only", color=TEXT, fontsize=10, pad=10)
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
+
+    # Definitive sentences naming actual categories (reliable-sample subset).
+    _top_cat_row = _reliable.iloc[0]
+    _bot_cat_row = _reliable.iloc[-1]
+    _n_above = int((_reliable["Deviation"] > 0).sum())
+    _n_below = len(_reliable) - _n_above
+    cat_sentences = [
+        f"**{_top_cat_row['Category']}** receives the **largest** discounts of any "
+        f"well-sampled category: {_top_cat_row['MeanDiscount']:.1f}% on average "
+        f"({_top_cat_row['Deviation']:+.1f} pp vs the dataset mean of "
+        f"{_overall_mean:.1f}%), across {int(_top_cat_row['Products'])} products.",
+
+        f"**{_bot_cat_row['Category']}** receives the **smallest** discounts: "
+        f"{_bot_cat_row['MeanDiscount']:.1f}% on average "
+        f"({_bot_cat_row['Deviation']:+.1f} pp vs the dataset mean), "
+        f"across {int(_bot_cat_row['Products'])} products.",
+
+        f"Among the {len(_reliable)} categories with at least {_MIN_N} products, "
+        f"{_n_above} sit above the dataset-wide average discount and {_n_below} below. "
+        "The spread between the highest- and lowest-discount well-sampled categories is "
+        f"**{_top_cat_row['MeanDiscount'] - _bot_cat_row['MeanDiscount']:.1f} pp** — "
+        "category alone explains a meaningful slice of the variation in discount %.",
+    ]
+
+    st.markdown("#### Bottom line")
+    for s in cat_sentences:
+        st.markdown(f"- {s}")
+
+    st.caption(
+        f"“pp” = percentage points. Each category's deviation is its mean discount % minus "
+        f"the overall dataset mean ({_overall_mean:.1f}%). Categories are the 9 top-level "
+        "groups extracted from the first segment of the pipe-separated category path; "
+        f"the chart and bullet conclusions are restricted to the {len(_reliable)} categories "
+        f"with at least {_MIN_N} products so single-product groups don't drive claims."
     )
