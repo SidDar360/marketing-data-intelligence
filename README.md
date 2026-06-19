@@ -1,6 +1,6 @@
 # Marketing Data Intelligence
 
-An end-to-end machine learning system for e-commerce analytics built on the [Amazon Sales Dataset](https://www.kaggle.com/datasets/karkavelrajaj/amazon-sales-dataset). The system provides discount and price prediction models, an AI-powered product assistant using Retrieval-Augmented Generation (RAG), a REST API, and an interactive Streamlit demo.
+An end-to-end machine learning system for e-commerce analytics built on the [Amazon Sales Dataset](https://www.kaggle.com/datasets/karkavelrajaj/amazon-sales-dataset). The system provides discount and price prediction models with multiple selectable algorithms, an interactive Streamlit demo with Feature Explorer and PCA Explorer pages, and a REST API.
 
 ---
 
@@ -8,12 +8,13 @@ An end-to-end machine learning system for e-commerce analytics built on the [Ama
 
 | Capability | Details |
 |---|---|
-| **Discount Prediction** | RandomForestRegressor predicts `discount_percentage` — R² 0.97, RMSE 3.8 pp |
-| **Price Prediction** | LinearRegression predicts `discounted_price` — R² 0.95, RMSE ₹1,200 |
-| **AI Assistant** | FAISS semantic search + `google/flan-t5-base` answers product questions |
+| **Discount Prediction** | Choose between Linear Regression, Ridge, Random Forest, or Gradient Boosting — predict `discount_percentage` |
+| **Price Prediction** | Same four-model selector — predict `discounted_price` |
+| **Per-model Parameter Tuning** | Each non-linear model exposes its key hyperparameters as sliders with plain-English explanations |
+| **Feature Explorer** | Pearson correlation heatmap with worked example, feature selection path, and category target-encoding |
+| **PCA Explorer** | Step-by-step principal component analysis ending with per-feature and per-category impact on discount % |
 | **Drift Detection** | Per-feature z-score check flags out-of-distribution prediction inputs |
-| **REST API** | FastAPI with `/predict_discount` and `/answer_question` endpoints |
-| **Interactive UI** | Streamlit app with live predictions, charts, and a chat interface |
+| **REST API** | FastAPI with `/predict_discount` and `/answer_question` (RAG) endpoints |
 | **Docker** | Single `docker compose up --build` starts the API server |
 
 ---
@@ -25,9 +26,10 @@ amazon.csv
     │
     ▼
 data_preprocessing.py        Clean raw strings (₹, %, commas) → numeric DataFrame
+    │                         + normalize_features() for PCA
     │
-    ├──▶ models.py            Train RandomForest (discount) + LinearRegression (price)
-    │         │                Save models to artifacts/
+    ├──▶ models.py            Train selected algorithm for discount + price tasks
+    │         │                Save baseline models to artifacts/
     │         └──▶ check_drift()   Z-score check at inference time
     │
     └──▶ rag.py               Build text documents per product
@@ -35,10 +37,16 @@ data_preprocessing.py        Clean raw strings (₹, %, commas) → numeric Data
               │                Save index to artifacts/
               └──▶ generate_answer()   Retrieve top-k docs → flan-t5-base
 
-artifacts/                   Pickled models, FAISS index, training stats
+artifacts/                   Pickled baseline models, FAISS index, training stats
     │
     ├──▶ api.py               FastAPI: /predict_discount, /answer_question
-    └──▶ app.py               Streamlit: Overview, Predict, AI Assistant, Insights
+    └──▶ app.py               Streamlit:
+                                · Overview
+                                · Feature Explorer
+                                · PCA Explorer
+                                · Predict Discount
+                                · Predict Price
+                                · Model Insights
 ```
 
 ---
@@ -48,7 +56,7 @@ artifacts/                   Pickled models, FAISS index, training stats
 ### Prerequisites
 
 - Python 3.11+
-- ~2 GB disk space (for HuggingFace model cache)
+- ~2 GB disk space (for HuggingFace model cache, only required if you use the RAG endpoint)
 
 ### 1 — Install dependencies
 
@@ -56,7 +64,7 @@ artifacts/                   Pickled models, FAISS index, training stats
 pip install -r requirements.txt
 ```
 
-### 2 — Train models and build the RAG index
+### 2 — Train baseline models and build the RAG index
 
 ```bash
 python train.py
@@ -72,13 +80,15 @@ This writes six files to `artifacts/`:
 
 Expected runtime: ~30 s on a modern laptop.
 
+> The Streamlit app trains additional models on-the-fly when you switch algorithms or move the parameter sliders — results are cached so each combination only trains once per session.
+
 ### 3 — Launch the Streamlit demo
 
 ```bash
 streamlit run app.py
 ```
 
-Open http://localhost:8501 in your browser.
+Open http://localhost:8501 in your browser. On Streamlit Community Cloud the app bootstraps its own artifacts on first run.
 
 ### 4 — (Optional) Start the REST API
 
@@ -90,18 +100,31 @@ Interactive docs at http://localhost:8000/docs.
 
 ---
 
+## Streamlit Pages
+
+| Page | What it shows |
+|---|---|
+| **Overview** | Dataset summary, distributions, headline KPIs |
+| **Feature Explorer** | Pearson correlation heatmap with an inline worked example; feature selection path showing how R² changes as features are added; category target-encoding panel |
+| **PCA Explorer** | Standardised features → PCA components, variance explained, biplots, then Step 7 (definitive per-feature impact on discount %) and Step 8 (per-category breakdown) |
+| **Predict Discount** | Pick a model, tune its parameters, enter a product's features, get a discount prediction with drift warning |
+| **Predict Price** | Same selector for predicting discounted price |
+| **Model Insights** | Metrics, coefficients/feature-importances, and a residual plot for the currently selected model |
+
+---
+
 ## Project Structure
 
 ```
 marketing-data-intelligence/
 ├── amazon.csv                 Raw dataset (1,465 products, 16 columns)
 ├── train.py                   Training pipeline entry point
-├── app.py                     Streamlit demo app
+├── app.py                     Streamlit demo app (6 pages)
 ├── requirements.txt
 ├── Dockerfile
 ├── docker-compose.yml
 ├── src/
-│   ├── data_preprocessing.py  Data loading, cleaning, feature extraction
+│   ├── data_preprocessing.py  Loading, cleaning, feature extraction, normalize_features
 │   ├── models.py              Model training, evaluation, persistence, drift detection
 │   ├── rag.py                 RAG pipeline: corpus, FAISS index, retrieval, generation
 │   └── api.py                 FastAPI application
@@ -129,7 +152,7 @@ Liveness probe.
 
 ### `POST /predict_discount`
 
-Predict the discount percentage for a product.
+Predict the discount percentage for a product. Backed by the baseline RandomForest saved by `train.py`.
 
 **Request body**
 ```json
@@ -169,7 +192,7 @@ curl -X POST http://localhost:8000/predict_discount \
 
 ### `POST /answer_question`
 
-Answer a product-related question via RAG + LLM.
+Answer a product-related question via RAG + LLM. The AI assistant lives at the API layer only — there is no chat page in the Streamlit UI.
 
 **Request body**
 ```json
@@ -239,7 +262,7 @@ Run a single file:
 pytest tests/test_api.py -v
 ```
 
-The test suite uses mocks for the sklearn models and the RAG pipeline, so no artifacts are required to run tests.
+The test suite contains 18 tests across `test_preprocessing.py` (7), `test_models.py` (6), and `test_api.py` (5). Mocks are used for the sklearn models and the RAG pipeline, so no artifacts are required to run tests.
 
 ---
 
@@ -264,7 +287,24 @@ The [Amazon Sales Dataset](https://www.kaggle.com/datasets/karkavelrajaj/amazon-
 
 ## Model Details
 
-### RandomForest — Discount Prediction
+### Available Algorithms
+
+Both the discount and price tasks let you swap between four algorithms from the Streamlit UI:
+
+| Model | Tunable Parameters | Notes |
+|---|---|---|
+| Linear Regression | — | Closed-form baseline, fully interpretable |
+| Ridge Regression | `alpha` | Linear with L2 regularisation; more stable when features are correlated |
+| Random Forest | `n_estimators`, `max_depth`, `min_samples_split` | Handles non-linear patterns and interactions |
+| Gradient Boosting | `n_estimators`, `learning_rate`, `max_depth` | Often the most accurate on tabular data |
+
+Each slider has a tooltip plus an always-visible plain-English explanation describing what low vs. high values do.
+
+### Baseline Metrics
+
+These are the metrics for the models saved by `train.py` (RandomForest for discount, LinearRegression for price). Other algorithm/parameter combinations are trained on-the-fly in the UI and their metrics are shown live on the Model Insights page.
+
+**RandomForest — Discount Prediction**
 
 | Metric | Value |
 |---|---|
@@ -274,9 +314,7 @@ The [Amazon Sales Dataset](https://www.kaggle.com/datasets/karkavelrajaj/amazon-
 
 Features used: `actual_price`, `discounted_price`, `rating`, `rating_count`.
 
-The large improvement over naïve label-encoding of all columns (which gave R² 0.65 in the original notebooks) comes from using only semantically meaningful numeric features instead of treating string IDs and URLs as ordinal categories.
-
-### LinearRegression — Price Prediction
+**LinearRegression — Price Prediction**
 
 | Metric | Value |
 |---|---|
@@ -286,7 +324,7 @@ The large improvement over naïve label-encoding of all columns (which gave R² 
 
 Features used: `actual_price`, `rating`, `rating_count`, `discount_percentage`.
 
-### RAG Assistant
+### RAG Assistant (API only)
 
 | Component | Choice | Reason |
 |---|---|---|
