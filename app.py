@@ -439,6 +439,87 @@ def dynamic_test_predictions(_df, model_name: str, task: str, params_json: str =
     return y_test.values, model.predict(X_test), evaluate_model(model, X_test, y_test)
 
 
+# ── Category-augmented model helpers ─────────────────────────────────────────
+# These mirror train_dynamic_model / dynamic_test_predictions but append an
+# encoded product-category column to the feature matrix.  They power the
+# "Predict + Category" page and are kept separate so the base Predict Discount
+# / Predict Price pages are unaffected.
+
+def _build_features_with_category(_df, task: str, encoding_method: str):
+    """Return (X_with_category, y, encoded_col_names) for the chosen task.
+
+    Wraps the standard feature-extractor and appends one or more columns from
+    ``encode_category``.  The encoded columns are aligned by index, so no
+    reset is required.
+    """
+    if task == "discount":
+        X, y = get_feature_target_for_discount(_df)
+        target_col = "discount_percentage"
+    else:
+        X, y = get_feature_target_for_price(_df)
+        target_col = "discounted_price"
+    enc_df, enc_cols = encode_category(_df, encoding_method, target_col)
+    return pd.concat([X, enc_df], axis=1), y, enc_cols
+
+
+@st.cache_resource
+def train_dynamic_model_with_category(
+    model_name: str,
+    task: str,
+    params_json: str = "{}",
+    encoding_method: str = "frequency",
+):
+    """Train a model with category included as an extra feature column.
+
+    Same interface as ``train_dynamic_model`` plus an ``encoding_method`` that
+    selects how the top-level category string is turned into numbers
+    (``"frequency"`` is the default because it avoids target leakage and adds
+    just one column).
+    """
+    df_tr = load_and_clean_data(CSV_PATH)
+    X, y, _ = _build_features_with_category(df_tr, task, encoding_method)
+    cfg = _MODELS[model_name]
+    merged = {**cfg["params"], **json.loads(params_json)}
+    m = cfg["cls"](**merged)
+    m.fit(X, y)
+    return m
+
+
+@st.cache_data
+def dynamic_test_predictions_with_category(
+    _df,
+    model_name: str,
+    task: str,
+    params_json: str = "{}",
+    encoding_method: str = "frequency",
+):
+    """Return (y_test, y_pred, metrics) for the category-augmented model."""
+    model = train_dynamic_model_with_category(model_name, task, params_json, encoding_method)
+    X, y, _ = _build_features_with_category(_df, task, encoding_method)
+    _, X_test, _, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    return y_test.values, model.predict(X_test), evaluate_model(model, X_test, y_test)
+
+
+@st.cache_data
+def category_encoding_lookup(_df, encoding_method: str, target_col: str):
+    """Return a dict mapping each top-level category name to its encoded value(s).
+
+    Used by the "Predict + Category" page to translate the user's category
+    selection into the exact numeric value(s) the model was trained on.
+
+    For scalar encodings (label / frequency / target) the dict maps
+    ``category_name -> {encoded_col: float}``.  For one-hot it maps
+    ``category_name -> {"cat_<name>": 1.0, ...zeros for the rest}``.
+    """
+    enc_df, enc_cols = encode_category(_df, encoding_method, target_col)
+    cat = get_top_level_category(_df)
+    lookup: dict = {}
+    for name in sorted(cat.unique()):
+        first_idx = cat[cat == name].index[0]
+        lookup[name] = {col: float(enc_df.loc[first_idx, col]) for col in enc_cols}
+    return lookup, enc_cols
+
+
 @st.cache_data
 def rf_test_predictions(_df):
     """Test predictions for the artifact-trained RandomForest (legacy, used by older code paths)."""
@@ -604,6 +685,7 @@ _PAGES = [
     ("pca",      "🔬  PCA Explorer"),
     ("discount", "🏷️  Predict Discount"),
     ("price",    "💰  Predict Price"),
+    ("cat",      "🧩  Predict + Category"),
     ("insights", "📈  Model Insights"),
 ]
 with st.sidebar:
@@ -1593,6 +1675,290 @@ elif page == "price":
         with st.popover("ℹ️ What does this show?", use_container_width=True):
             st.markdown("**Price Range Context**")
             st.markdown("The grey bars show the full spread of selling prices in the dataset (top 3% clipped). The green line marks your prediction. If the line is far from the main cluster, the model has seen fewer similar products and the prediction may be less accurate.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PREDICT + CATEGORY  (parallel to Predict Discount / Predict Price but with
+# the product category included as an additional feature)
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "cat":
+    st.title("🧩 Predict + Category")
+    st.markdown(
+        "Same task as **Predict Discount** and **Predict Price**, but with the "
+        "product's **top-level category** wired in as an extra input feature."
+    )
+
+    with st.expander("📖 What's different from the other Predict pages?", expanded=True):
+        st.markdown(
+            "The base Predict Discount and Predict Price pages train on **4 numeric features** each:\n\n"
+            "- **Predict Discount** → `actual_price, discounted_price, rating, rating_count`\n"
+            "- **Predict Price**    → `actual_price, rating, rating_count, discount_percentage`\n\n"
+            "This page adds a **5th feature**: the product's top-level category "
+            "(one of 9 groups: *Electronics*, *Computers&Accessories*, *Home&Kitchen*, "
+            "*OfficeProducts*, *MusicalInstruments*, *HealthPersonalCare*, *Toys&Games*, "
+            "*Car&Motorbike*, *HomeImprovement*).\n\n"
+            "Category is a **string**, so it must first be converted to numbers. Four "
+            "conversion strategies are supported below — each has a different tradeoff. "
+            "**Frequency encoding** is the default because it never uses the target "
+            "variable (no leakage risk) and only adds one column.\n\n"
+            "**Everything on this page is trained from scratch** on the fly — no artifact "
+            "on disk is touched, and the existing baseline models remain unchanged."
+        )
+
+    st.markdown("---")
+
+    # ── Task toggle ──────────────────────────────────────────────────────────
+    col_task, col_enc = st.columns([1, 1])
+    with col_task:
+        task_label = st.radio(
+            "Prediction target",
+            ["Discount %", "Price ₹"],
+            horizontal=True,
+            key="cat_task",
+        )
+    cat_task = "discount" if task_label == "Discount %" else "price"
+
+    with col_enc:
+        _ENC_OPTS = {
+            "Frequency (default, no leakage)":  ("frequency", "discount_percentage"),
+            "Label (integer codes)":            ("label",     "discount_percentage"),
+            "Target — mean discount %":         ("target",    "discount_percentage"),
+            "Target — mean price ₹":            ("target",    "discounted_price"),
+            "One-Hot (9 binary columns)":       ("onehot",    "discount_percentage"),
+        }
+        enc_label = st.selectbox(
+            "Category encoding method",
+            list(_ENC_OPTS.keys()),
+            index=0,
+            key="cat_enc_method",
+        )
+        cat_method, cat_target_col = _ENC_OPTS[enc_label]
+
+    _ENC_NOTE = {
+        "frequency": "Each category → its share of all products (0–1). Adds **1 column**. Safe: never touches the target.",
+        "label":     "Each category → an alphabetical integer (0–8). Adds **1 column**. Fine for tree models; imposes false ordering on linear models.",
+        "target":    "Each category → the **average value of the target** for that category. Adds **1 column**. Strongest single-feature signal, but uses target labels (leakage risk in production).",
+        "onehot":    "One binary column per category. Adds **9 columns**. No ordering, each category's signal captured independently. Preferred for linear models when you can afford the columns.",
+    }
+    st.caption(_ENC_NOTE[cat_method])
+
+    st.markdown("---")
+
+    # ── Model selector + fine-tuning ─────────────────────────────────────────
+    cat_model_name = st.selectbox(
+        "Model",
+        list(_MODELS.keys()),
+        index=2 if cat_task == "discount" else 0,
+        key="cat_model",
+    )
+    _mcfg = _MODELS[cat_model_name]
+    with st.expander(f"📖 What is {cat_model_name}?  {_mcfg['speed']}"):
+        st.markdown(_mcfg["desc"])
+        pc1, pc2 = st.columns(2)
+        pc1.success(f"✅ **Strengths:** {_mcfg['pros']}")
+        pc2.warning(f"⚠️ **Limitations:** {_mcfg['cons']}")
+    cat_params_json = _model_param_ui(cat_model_name, "cat")
+
+    st.markdown("---")
+
+    col_in, col_out = st.columns([1, 1], gap="large")
+
+    # ── Inputs ───────────────────────────────────────────────────────────────
+    with col_in:
+        st.subheader("Product Attributes")
+
+        # Category selector — same 9 top-level groups the model was trained on.
+        cat_lookup, cat_enc_cols = category_encoding_lookup(df, cat_method, cat_target_col)
+        cat_names = list(cat_lookup.keys())
+        chosen_cat = st.selectbox(
+            "Category",
+            cat_names,
+            index=cat_names.index("Electronics") if "Electronics" in cat_names else 0,
+            key="cat_choice",
+        )
+
+        # Show the numeric encoding of the chosen category so users see exactly
+        # what the model receives.
+        _enc_display = ", ".join(
+            f"`{col}={val:.4f}`" for col, val in cat_lookup[chosen_cat].items()
+        )
+        st.caption(f"Encoded as: {_enc_display}")
+
+        if cat_task == "discount":
+            ap = st.number_input("Actual / MRP Price (₹)", min_value=10.0, max_value=200000.0, value=999.0, step=50.0, key="cat_ap_d")
+            dp = st.number_input("Selling / Discounted Price (₹)", min_value=1.0, max_value=200000.0, value=599.0, step=50.0, key="cat_dp_d")
+            if dp >= ap:
+                st.warning("Selling price should be less than MRP for a discount to exist.")
+            rat = st.slider("Product Rating", 1.0, 5.0, 4.2, 0.1, key="cat_rat_d")
+            rat_cnt = st.number_input("Number of Ratings", min_value=1, max_value=500000, value=1200, step=100, key="cat_rc_d")
+            base_row = [ap, dp, rat, float(rat_cnt)]
+            base_features = _DISCOUNT_FEATURES
+        else:
+            ap = st.number_input("Actual / MRP Price (₹)", min_value=10.0, max_value=200000.0, value=999.0, step=50.0, key="cat_ap_p")
+            disc_pct = st.slider("Discount Percentage (%)", 0.0, 95.0, 40.0, 1.0, key="cat_dp_p")
+            rat = st.slider("Rating", 1.0, 5.0, 4.0, 0.1, key="cat_rat_p")
+            rat_cnt = st.number_input("Number of Ratings", min_value=1, max_value=500000, value=5000, step=100, key="cat_rc_p")
+            base_row = [ap, rat, float(rat_cnt), disc_pct]
+            base_features = _PRICE_FEATURES
+
+        # Append category encoding column(s) in the same order they were built
+        # during training (encode_category returns a stable column order).
+        cat_values = [cat_lookup[chosen_cat][col] for col in cat_enc_cols]
+        row_with_cat = base_row + cat_values
+
+    # ── Predictions & comparison ─────────────────────────────────────────────
+    with col_out:
+        st.subheader("Prediction")
+
+        # Category-augmented model (this page's model).
+        with st.spinner(f"Training {cat_model_name} with category…"):
+            cat_model = train_dynamic_model_with_category(
+                cat_model_name, cat_task, cat_params_json, cat_method,
+            )
+        pred_cat = float(cat_model.predict(np.array([row_with_cat]))[0])
+
+        # Baseline model — identical model + hyperparams, trained on the same
+        # 4 numeric features as the original Predict pages (no category).
+        with st.spinner(f"Training {cat_model_name} without category…"):
+            base_model = train_dynamic_model(cat_model_name, cat_task, cat_params_json)
+        pred_base = float(base_model.predict(np.array([base_row]))[0])
+
+        if cat_task == "discount":
+            pred_cat = float(np.clip(pred_cat, 0.0, 100.0))
+            pred_base = float(np.clip(pred_base, 0.0, 100.0))
+            unit_fmt = lambda v: f"{v:.1f}%"
+            delta_fmt = lambda v: f"{v:+.1f} pp"
+            kpi_label = "Predicted Discount"
+        else:
+            unit_fmt = lambda v: f"₹{v:,.0f}"
+            delta_fmt = lambda v: f"{'+' if v >= 0 else '−'}₹{abs(v):,.0f}"
+            kpi_label = "Predicted Selling Price"
+
+        st.markdown(
+            f'<div class="kpi-card"><div class="kpi-value">{unit_fmt(pred_cat)}</div>'
+            f'<div class="kpi-label">{kpi_label} (with category)</div></div>',
+            unsafe_allow_html=True,
+        )
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.metric("With category", unit_fmt(pred_cat))
+        with c2:
+            st.metric(
+                "Baseline (no category)",
+                unit_fmt(pred_base),
+                delta=delta_fmt(pred_cat - pred_base),
+                delta_color="off",
+            )
+        st.caption(
+            "Both predictions use the same algorithm and hyperparameters — the "
+            "**only** difference is whether the model saw the category column. "
+            "The delta is how much your chosen category shifts the prediction."
+        )
+
+    st.markdown("---")
+
+    # ── Held-out test metrics: base vs +category ─────────────────────────────
+    st.subheader("Does category actually help? — Test-set metrics")
+    st.markdown(
+        "Both variants are evaluated on the same 20% held-out split "
+        "(``random_state=42``). Compare the R², RMSE, and MAE below to see "
+        "whether adding category improves generalisation for **this model + "
+        "encoding** combination."
+    )
+
+    _, _, m_base = dynamic_test_predictions(df, cat_model_name, cat_task, cat_params_json)
+    _, _, m_cat  = dynamic_test_predictions_with_category(df, cat_model_name, cat_task, cat_params_json, cat_method)
+
+    if cat_task == "discount":
+        rmse_unit = "pp"
+        rmse_fmt = "{:.2f}"
+    else:
+        rmse_unit = "₹"
+        rmse_fmt = "{:,.0f}"
+
+    metric_df = pd.DataFrame(
+        [
+            {
+                "Variant": "Baseline (4 features)",
+                "R²": f"{m_base['r2']:.4f}",
+                f"RMSE ({rmse_unit})": rmse_fmt.format(m_base["rmse"]),
+                f"MAE ({rmse_unit})": rmse_fmt.format(m_base["mae"]),
+            },
+            {
+                "Variant": f"+ Category ({cat_method})",
+                "R²": f"{m_cat['r2']:.4f}",
+                f"RMSE ({rmse_unit})": rmse_fmt.format(m_cat["rmse"]),
+                f"MAE ({rmse_unit})": rmse_fmt.format(m_cat["mae"]),
+            },
+            {
+                "Variant": "Δ (category − baseline)",
+                "R²": f"{m_cat['r2'] - m_base['r2']:+.4f}",
+                f"RMSE ({rmse_unit})": rmse_fmt.format(m_cat["rmse"] - m_base["rmse"]),
+                f"MAE ({rmse_unit})": rmse_fmt.format(m_cat["mae"] - m_base["mae"]),
+            },
+        ]
+    )
+    st.dataframe(metric_df, use_container_width=True, hide_index=True)
+
+    delta_r2 = m_cat["r2"] - m_base["r2"]
+    if delta_r2 > 0.005:
+        st.success(
+            f"✅ Category **helps** — R² improved by {delta_r2:+.4f} and RMSE "
+            f"dropped by {m_base['rmse'] - m_cat['rmse']:+.4f} {rmse_unit}."
+        )
+    elif delta_r2 < -0.005:
+        st.warning(
+            f"⚠️ Category **hurts** this model — R² dropped by {delta_r2:+.4f}. "
+            "Try a different encoding (target encoding is usually strongest for "
+            "linear models; frequency or one-hot for tree models)."
+        )
+    else:
+        st.info(
+            f"➖ Category is roughly **neutral** (ΔR² = {delta_r2:+.4f}). "
+            "The four base features already capture most of the signal for this "
+            "target."
+        )
+
+    # ── Model-specific inspection ────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("How the model uses the category column")
+
+    # Reconstruct feature-name list in the same order the model was trained on.
+    aug_feature_names = list(base_features) + list(cat_enc_cols)
+
+    if hasattr(cat_model, "coef_"):
+        coef_df = pd.DataFrame({"Feature": aug_feature_names, "Coefficient": cat_model.coef_})
+        fig, ax = dark_fig(6, max(3, 0.35 * len(aug_feature_names) + 1))
+        colors = [
+            (PURPLE if f in cat_enc_cols else (GREEN if c > 0 else RED))
+            for f, c in zip(coef_df["Feature"], coef_df["Coefficient"])
+        ]
+        ax.barh(coef_df["Feature"], coef_df["Coefficient"], color=colors)
+        ax.axvline(0, color=TEXT, linewidth=0.8)
+        ax.set_xlabel("Coefficient value")
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+        st.caption(
+            "Purple bars are the category-derived columns. Their magnitude "
+            "relative to the base features shows how much weight the model "
+            "places on category signal."
+        )
+    elif hasattr(cat_model, "feature_importances_"):
+        imp_df = pd.DataFrame(
+            {"Feature": aug_feature_names, "Importance": cat_model.feature_importances_}
+        ).sort_values("Importance")
+        fig, ax = dark_fig(6, max(3, 0.35 * len(aug_feature_names) + 1))
+        colors = [PURPLE if f in cat_enc_cols else BLUE for f in imp_df["Feature"]]
+        ax.barh(imp_df["Feature"], imp_df["Importance"], color=colors)
+        ax.set_xlabel("Feature importance")
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+        st.caption(
+            "Purple bars are the category-derived columns. If the category "
+            "columns rank near the top, the tree ensemble is leaning heavily "
+            "on category to make its splits."
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
